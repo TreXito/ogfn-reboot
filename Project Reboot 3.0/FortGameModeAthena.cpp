@@ -7,6 +7,7 @@
 #include "MegaStormManager.h"
 #include "FortLootPackage.h"
 #include "FortPlayerPawn.h"
+#include "ogfn_locker.h"
 #include "FortPickup.h"
 #include "bots.h"
 
@@ -1045,6 +1046,10 @@ bool AFortGameModeAthena::Athena_ReadyToStartMatchHook(AFortGameModeAthena* Game
 		LOG_INFO(LogDev, "bShouldUseReplicationGraph: {}", Globals::bShouldUseReplicationGraph);
 
 		Globals::bStartedListening = true;
+
+		// First joined player gets dressed by the server (the client locker has no MCP
+		// path on 3.5; see ogfn_locker.h). Runs every hook tick until it succeeds.
+		OgfnLocker::AutoApplyOnce();
 	}
 
 	bool Ret = false;

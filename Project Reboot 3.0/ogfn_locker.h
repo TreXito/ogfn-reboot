@@ -13,6 +13,7 @@
 #include "reboot.h"
 #include "globals.h"
 #include "UnrealString.h"
+#include <cstdio>
 #include "KismetTextLibrary.h"
 #include "FortPlayerController.h"
 #include "FortPlayerControllerAthena.h"
@@ -28,6 +29,12 @@ namespace OgfnLocker
 	extern inline int SelectedCharacter = -1;
 	extern inline int SelectedEmote = -1;
 	extern inline char SearchBuf[64] = {};
+
+	// Auto-apply on first joined player: the in-game client locker does not reach the
+	// server (no MCP cosmetic plumbing on 3.5 without Reboot console access), so the
+	// server dresses the pawn itself. The full CID catalog is dumped to disk once so
+	// any preference can be wired by name later.
+	extern inline bool bAutoApplied = false;
 
 	// Fresh GetOffset per object: character and emote definitions are different classes and
 	// must not share a cached offset.
@@ -115,6 +122,47 @@ namespace OgfnLocker
 		{
 			LOG_ERROR(LogBots, "[ogfn] locker: ApplyCID failed for {}.", CID->GetPathName());
 		}
+	}
+
+	// Called repeatedly from the ReadyToStartMatch hook: once a connected player has a
+	// pawn, dress it once with a random catalog skin and dump the full CID list to
+	// C:\ogfn\cidlist.txt so any skin can be pinned by name in a later iteration.
+	// (The in-game client locker cannot reach the server: 3.5 has no MCP cosmetic
+	// plumbing and Reboot's ServerCheat console route is disabled in this build.)
+	static void AutoApplyOnce()
+	{
+		if (bAutoApplied)
+			return;
+
+		Populate();
+
+		if (Characters.empty())
+			return;
+
+		if (!GetLocalController())
+			return; // nobody joined yet
+
+		static bool bDumped = false;
+		if (!bDumped)
+		{
+			bDumped = true;
+			FILE* f = nullptr;
+			if (fopen_s(&f, "C:\\ogfn\\cidlist.txt", "w") == 0 && f)
+			{
+				for (int i = 0; i < (int)Characters.size(); ++i)
+				{
+					fprintf(f, "%s\t%s\n", Characters.at(i)->GetPathName().c_str(),
+					        CharacterNames.at(i).c_str());
+				}
+				fclose(f);
+			}
+		}
+
+		int idx = rand() % (int)Characters.size();
+		LOG_INFO(LogBots, "[ogfn] auto-applying skin {} ({}/{})", Characters.at(idx)->GetPathName(),
+		         idx + 1, (int)Characters.size());
+		ApplyCharacter(idx);
+		bAutoApplied = true;
 	}
 
 	static void PlayEmote(int Index)

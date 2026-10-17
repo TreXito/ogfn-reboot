@@ -34,6 +34,8 @@ public:
 	int TotalPlayersEncountered;
 	std::vector<BotPOI> POIsTraveled;
 	float NextJumpTime = 1.0f;
+	float NextBusJumpTime = 0.f;   // staggered bus deploy window per bot
+	bool bBusJumpScheduled = false;
 
 	void OnPlayerEncountered()
 	{
@@ -442,12 +444,32 @@ namespace Bots
 				}
 			}
 
-			/* bool bShouldJumpFromBus = CurrentPlayerState->IsInAircraft(); // TODO (Milxnor) add a random percent thing
-
-			if (bShouldJumpFromBus)
+			// Bus deploy: the commented-out TODO (Milxnor) left bots riding the aircraft
+			// forever while the island despawned under them -- they stayed alive in the
+			// count but never appeared in the match. Each bot now schedules ONE random
+			// jump 2..31s into the flight so the squad spreads along the path.
+			if (PlayerBot.bIsAthenaController && CurrentPawn && CurrentPlayerState->IsInAircraft())
 			{
-				CurrentPlayer->ServerAttemptAircraftJumpHook(CurrentPlayer, FRotator());
-			} */
+				if (!PlayerBot.bBusJumpScheduled)
+				{
+					PlayerBot.bBusJumpScheduled = true;
+					PlayerBot.NextBusJumpTime = UGameplayStatics::GetTimeSeconds(GetWorld()) + (float)(rand() % 30 + 2);
+				}
+
+				if (UGameplayStatics::GetTimeSeconds(GetWorld()) >= PlayerBot.NextBusJumpTime)
+				{
+					AFortPlayerController::ServerAttemptAircraftJumpHook(CurrentPlayer, FRotator());
+					LOG_INFO(LogBots, "[ogfn] bot deploying from bus");
+				}
+			}
+			else if (GameState->GetGamePhase() == EAthenaGamePhase::Aircraft && CurrentPawn &&
+			         PlayerBot.bIsAthenaController && !CurrentPlayerState->IsInAircraft() && !PlayerBot.bBusJumpScheduled)
+			{
+				// One-shot diagnostic: aircraft phase active but this bot has no in-aircraft
+				// state -- it would be stranded at the despawned island instead.
+				PlayerBot.bBusJumpScheduled = true;
+				LOG_ERROR(LogBots, "[ogfn] bot NOT in aircraft state during flight -- stranded check");
+			}
 		}
 
 		// AllBuildingContainers.Free();
