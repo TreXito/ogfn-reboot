@@ -60,9 +60,17 @@ Boot is solo: match starts when players-left >= 1, which any bot fulfils.
 
 ### ogfn-launcher + scripts
 
-* `Injector/OgfnInjector.cpp` -- a ~150-line documented `CreateProcessW(CREATE_SUSPENDED) ->
-  VirtualAllocEx -> WriteProcessMemory -> CreateRemoteThread(LoadLibraryW) -> ResumeThread`
-  injector, ASCII console, C++17. Single .clang/MSVC-clean file; you can read it in two minutes.
+* `Injector/OgfnInjector.cpp` -- creates the client suspended, **resumes immediately**, waits on `WaitForInputIdle`, settles 1500 ms (raise with `/wait:5000` after the exe path), then does the `VirtualAllocEx -> WriteProcessMemory -> CreateRemoteThread(LoadLibraryW)` injection. ASCII console, C++17. Why the wait: see "Packed shipping binary" below.
+
+### Packed shipping binary (why injection must wait)
+
+The S3-era `FortniteClient-Win64-Shipping.exe` is **section-packed**: `.text` entropy is
+7.86 at rest (~50 MB), a second `.text` section carries the unpack stub, and the entry
+point sits inside the packed region. Every byte-pattern and string scan against the
+still-suspended image found nothing: `Reboot.dll` AV'd at fault offset `0x759ff` (twice,
+identical), and `StaticFindObject - Base` reduced to `0 - Base` = `0xffff8009151b0000`
+in the log, which is the scan-returned-null tell. So the launcher resumes first and lets
+the exe's own loader unpack, and the gameserver's finders then read live mapped memory.
 * `build.ps1` -- VS2022 discovery via vswhere, then `MSBuild` on the upstream `.sln` (game DLL,
   Release x64) and the injector `.vcxproj`. Copies outputs to `out\` and tells you the next
   command. Fails loudly with the VS download link when the workload is missing.
