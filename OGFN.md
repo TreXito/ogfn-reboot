@@ -124,3 +124,29 @@ undoes every patch at once.
   build. Same mechanism, engine-agnostic library stays clean of SDK headers via an adapter file
   in this repo, so the brain stays g++/unit-testable and ZomboDB... engine-agnostic.
 * **remaining locker slots** -- pickaxe/glider/backpack via part classes after S3 verification.
+
+## Live-service strip (added 2026-10-17 night, after the silent-exit investigation)
+
+The 3.5 shipping client phones real Epic domains at boot; with nothing answering
+127.0.0.1:3551 it falls back to spawning the installed Epic Games Launcher and
+exits ("opens epic and that's it"). The full offline stack, matching
+Reboot-Launcher's own design (bundled LawinV1 backend on port 3551) and
+LawinServer's documented Fiddler recipe:
+
+* **C:\ogfn\backend** -- LawinV1 subtype from Reboot-Launcher (GPL-3; kept in its
+  own tree, never mixed with the BSD upstream or the fork's code). Node.js venv
+  already on the box; `npm ci` then logins, MCP, cloudstorage, matchmaker, XMPP:80.
+  Scheduled task `OGFN-BACKEND` -> `ops/backend-start.cmd`.
+* **C:\ogfn\mitm** -- mitmproxy venv; TLS-terminating proxy on 127.0.0.1:8980 with
+  `ops/ogfn_redirect.py`: requests to `*.epicgames.com` (minus `/v1/item/`) are
+  rewritten to `http://127.0.0.1:3551`, mirroring the official Lawin FiddlerScript.
+  `.dev` hosts are deliberately NOT rewritten so the user's real EGS keeps working
+  during a session. **Requires `--set connection_strategy=lazy`** (guess from
+  painful experience: eager mode opens upstream at CONNECT and the rewrite never
+  applies). Scheduled task `OGFN-PROXY` -> `ops/proxy-start.cmd`.
+* mitmproxy CA added to the Windows Root store (rollback:
+  `certutil -delstore Root mitmproxy`). Session-scoped system proxy (HKCU) is
+  enabled by `start.ps1` while the game runs and always restored in `finally`.
+* Verified end to end before touching the game:
+  `https://ol.epicgames.com/lightswitch/api/service/Fortnite/status` via the
+  proxy returned `200 "Fortnite is online"` from the local backend.
