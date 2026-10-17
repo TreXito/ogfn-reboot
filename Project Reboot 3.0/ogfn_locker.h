@@ -1,12 +1,12 @@
 #pragma once
 
-// OGFN Locker — every cosmetic that exists in the loaded client build, no backend required.
+// OGFN Locker -- every cosmetic that exists in the loaded client build, no backend required.
 // On 3.5.0 that is the full Season 3 catalogue: the object pool only contains what the client
 // ships, so every skin listed is a skin that can actually be worn.
 //
 // Characters apply through the same proven path as the console command `applycid`
 // (ApplyCID -> ApplyHID in FortPlayerControllerAthena.h); emotes through the same
-// ServerPlayEmoteItemHook the bot tick already calls. No client profile is written — without
+// ServerPlayEmoteItemHook the bot tick already calls. No client profile is written -- without
 // an MCP backend there is no profile to write into; this is the server applying cosmetics to
 // the host pawn, which the client then renders. That is the honest whole-game "full locker".
 
@@ -101,7 +101,7 @@ namespace OgfnLocker
 
 		if (!Pawn)
 		{
-			LOG_ERROR(LogBots, "[ogfn] locker: no pawn yet — join the lobby first.");
+			LOG_ERROR(LogBots, "[ogfn] locker: no pawn yet -- join the lobby first.");
 			return;
 		}
 

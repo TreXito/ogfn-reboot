@@ -1,4 +1,4 @@
-// OgfnInjector.cpp — offline private-server launcher helper.
+// OgfnInjector.cpp -- offline private-server launcher helper.
 // Starts FortniteClient-Win64-Shipping.exe suspended, injects the gameserver DLL, resumes.
 // Rank-and-file Win32: CreateProcessW(CREATE_SUSPENDED) -> VirtualAllocEx ->
 // WriteProcessMemory -> CreateRemoteThread(LoadLibraryW) -> ResumeThread.
@@ -33,7 +33,7 @@ int wmain(int argc, wchar_t** argv)
 {
     if (argc < 3)
     {
-        wprintf(L"OgfnInjector — offline private-server injector\n\n");
+        wprintf(L"OgfnInjector -- offline private-server injector\n\n");
         wprintf(L"usage: OgfnInjector.exe <full\\path\\to\\Reboot.dll> "
                 L"<full\\path\\to\\FortniteClient-Win64-Shipping.exe> [client args...]\n\n");
         wprintf(L"e.g.:  OgfnInjector.exe C:\\ogfn\\Reboot.dll C:\\ogfn\\3.5\\FortniteGame\\Binaries\\Win64\\FortniteClient-Win64-Shipping.exe -log\n");
@@ -101,7 +101,7 @@ int wmain(int argc, wchar_t** argv)
 
     if (hmod == 0)
     {
-        fprintf(stderr, "[ogfn] remote LoadLibraryW returned NULL — blocked or bad path.\n");
+        fprintf(stderr, "[ogfn] remote LoadLibraryW returned NULL -- blocked or bad path.\n");
         TerminateProcess(pi.hProcess, 1);
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
@@ -112,7 +112,7 @@ int wmain(int argc, wchar_t** argv)
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
 
-    wprintf(L"[ogfn] injected: DLL mapped at 0x%lx in pid %lu — game resuming.\n",
+    wprintf(L"[ogfn] injected: DLL mapped at 0x%lx in pid %lu -- game resuming.\n",
             (unsigned long)hmod, (unsigned long)pi.dwProcessId);
     wprintf(L"[ogfn] next you should see the gameserver's own log lines (or -log window).\n");
     return 0;
