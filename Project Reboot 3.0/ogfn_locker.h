@@ -108,9 +108,13 @@ namespace OgfnLocker
 		auto CID = Characters.at(Index);
 
 		if (ApplyCID(Pawn, CID))
+		{
 			LOG_INFO(LogBots, "[ogfn] locker: applied {}.", CID->GetPathName());
+		}
 		else
+		{
 			LOG_ERROR(LogBots, "[ogfn] locker: ApplyCID failed for {}.", CID->GetPathName());
+		}
 	}
 
 	static void PlayEmote(int Index)
