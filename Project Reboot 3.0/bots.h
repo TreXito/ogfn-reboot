@@ -458,8 +458,11 @@ namespace Bots
 
 				if (UGameplayStatics::GetTimeSeconds(GetWorld()) >= PlayerBot.NextBusJumpTime)
 				{
-					AFortPlayerController::ServerAttemptAircraftJumpHook(CurrentPlayer, FRotator());
-					LOG_INFO(LogBots, "[ogfn] bot deploying from bus");
+					if (auto AsPC = Cast<AFortPlayerController>(CurrentPlayer))
+					{
+						AFortPlayerController::ServerAttemptAircraftJumpHook(AsPC, FRotator());
+						LOG_INFO(LogBots, "[ogfn] bot deploying from bus");
+					}
 				}
 			}
 			else if (GameState->GetGamePhase() == EAthenaGamePhase::Aircraft && CurrentPawn &&

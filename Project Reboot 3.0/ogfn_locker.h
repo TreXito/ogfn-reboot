@@ -14,6 +14,7 @@
 #include "globals.h"
 #include "UnrealString.h"
 #include <cstdio>
+#include <ImGui/imgui.h>
 #include "KismetTextLibrary.h"
 #include "FortPlayerController.h"
 #include "FortPlayerControllerAthena.h"
