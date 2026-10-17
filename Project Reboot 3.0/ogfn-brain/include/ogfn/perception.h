@@ -1,0 +1,65 @@
+#pragma once
+#include <vector>
+
+#include "mathx.h"
+
+namespace ogfn {
+
+// Ground truth handed to the bot by the engine every tick. The bot is not allowed
+// to use most of it: Perception throws away everything a human could not see.
+struct EnemySample {
+  int id = 0;
+  Vec3 pos;
+  float health = 100.f;
+  bool line_of_sight = false;
+};
+
+struct Observation {
+  Vec3 self_pos;
+  float self_yaw_deg = 0.f;
+  std::vector<EnemySample> enemies;
+};
+
+struct PerceptionConfig {
+  float fov_half_deg = 52.f;  // ~104 deg total, human-ish game FOV
+  float max_range = 90.f;
+  float memory_secs = 4.0f;   // how long a lost target stays in mind
+  float lock_secs = 0.35f;    // time on target before it can be fought
+  float max_dt = 0.1f;        // caps a single tick, so a stalled frame does not
+                              // retroactively grant lock-on time
+};
+
+struct TrackedTarget {
+  int id = 0;
+  Vec3 last_seen_pos;
+  bool visible = false;
+  float health = 100.f;
+  double last_seen_time = -1e9;
+  float tracked_for = 0.f;  // consecutive visible seconds
+  bool fightable = false;
+
+  float age(double now) const { return static_cast<float>(now - last_seen_time); }
+};
+
+class Perception {
+ public:
+  explicit Perception(PerceptionConfig cfg = {}) : cfg_(cfg) {}
+
+  const PerceptionConfig& config() const { return cfg_; }
+  void update(const Observation& obs, double now);
+
+  const std::vector<TrackedTarget>& targets() const { return targets_; }
+  const TrackedTarget* nearest(bool require_visible) const;
+  const TrackedTarget* by_id(int id) const;
+  bool can_see(int id, double now, float max_age = 0.f) const;
+
+  // True if the bot currently has line of sight to its own nearest target.
+  bool has_visible_target() const { return nearest(true) != nullptr; }
+
+ private:
+  PerceptionConfig cfg_;
+  std::vector<TrackedTarget> targets_;
+  double last_time_ = 0.0;
+};
+
+}  // namespace ogfn

@@ -337,7 +337,14 @@ public:
 	}
 };
 
-static inline std::vector<PlayerBot> AllPlayerBotsToTick;
+// C++17 `static inline` at header scope means internal linkage: ONE COPY PER
+// TRANSLATION UNIT. bots.h is included by four .cpp files, so with `static` the
+// spawn path (FortGameModeAthena.cpp) pushed into one vector while Bots::Tick()
+// (NetDriver.cpp) iterated another that was always empty -- stock bots never
+// ticked at all. Plain `inline` merges to a single object across all TUs.
+inline std::vector<PlayerBot> AllPlayerBotsToTick;
+
+namespace OgfnBot { void TickAll(); } // ogfn-brain-adapter.cpp, gated by Globals::bEnableOgfnBrain
 
 namespace Bots
 {
@@ -397,6 +404,9 @@ namespace Bots
 		// auto AllBuildingContainers = UGameplayStatics::GetAllActorsOfClass(GetWorld(), ABuildingContainer::StaticClass());
 
 		// for (int i = 0; i < GameMode->GetAlivePlayers().Num(); ++i)
+
+		OgfnBot::TickAll();
+
 		for (auto& PlayerBot : AllPlayerBotsToTick)
 		{
 			auto CurrentPlayer = PlayerBot.Controller;
@@ -433,7 +443,7 @@ namespace Bots
 				CurrentPlayer->ProcessEvent(ServerThankBusDriverFn);
 			}
 
-			if (CurrentPawn)
+			if (CurrentPawn && !Globals::bEnableOgfnBrain)
 			{
 				if (PlayerBot.NextJumpTime <= UGameplayStatics::GetTimeSeconds(GetWorld()))
 				{
