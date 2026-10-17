@@ -386,3 +386,18 @@ Project Reboot 3.0/x64/Release/Project Reboot 3.0.iobj
 *.ifc
 *.pdb
 Build/
+
+# --- ogfn additions ---
+# build outputs
+out/
+*.user
+# client builds live OUTSIDE this tree, never here
+client/
+*.rar
+*.zip
+FortniteGame/
+Engine/
+# launcher scratch
+Skins.txt
+Playlists.txt
+Objects.txt
