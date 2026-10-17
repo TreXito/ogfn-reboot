@@ -32,6 +32,80 @@ static bool IsAbsolute(const std::wstring& p)
            (p.size() >= 2 && p[0] == L'\\' && p[1] == L'\\');
 }
 
+// UE's client log lives in %LOCALAPPDATA%\FortniteGame\Saved\Logs. Boot gate: the engine
+// prints "Game Engine Initialized" only once GEngine/world exist; injecting before it
+// makes Reboot's server setup run against a null world context (observed 2026-10-17
+// 21:25: 16x GetWorldFromContextObject null warnings, then AV in map-open).
+static std::wstring ClientLogPath()
+{
+    wchar_t buf[MAX_PATH] = {};
+    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH))
+        return L"";
+    std::wstring p(buf);
+    return p + L"\\FortniteGame\\Saved\\Logs\\FortniteGame.log";
+}
+
+static std::string ReadTail(const std::wstring& path, size_t bytes)
+{
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return {};
+
+    std::string out;
+    LARGE_INTEGER sz{};
+    if (GetFileSizeEx(h, &sz))
+    {
+        LARGE_INTEGER start{};
+        start.QuadPart = sz.QuadPart - (long long)bytes;
+        if (start.QuadPart < 0) start.QuadPart = 0;
+        if (SetFilePointerEx(h, start, nullptr, FILE_BEGIN))
+        {
+            out.resize((size_t)(sz.QuadPart - start.QuadPart));
+            DWORD read = 0;
+            if (ReadFile(h, out.data(), (DWORD)out.size(), &read, nullptr))
+                out.resize(read);
+        }
+    }
+    CloseHandle(h);
+    return out;
+}
+
+static bool FileIsNewerThan(const std::wstring& path, const FILETIME& ref)
+{
+    WIN32_FILE_ATTRIBUTE_DATA fad{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
+        return false;
+    return CompareFileTime(&fad.ftLastWriteTime, &ref) >= 0;
+}
+
+// Waits for the FRESH log (written after bootStart) to contain the engine-ready line.
+static bool WaitForEngineInit(const FILETIME& bootStart, DWORD capMs)
+{
+    const std::wstring log = ClientLogPath();
+    if (log.empty())
+        return false;
+
+    ULONGLONG t0 = GetTickCount64();
+    bool fresh = false;
+    while (GetTickCount64() - t0 < capMs)
+    {
+        if (!fresh)
+            fresh = FileIsNewerThan(log, bootStart);
+
+        if (fresh)
+        {
+            std::string tail = ReadTail(log, 65536);
+            if (!tail.empty() &&
+                tail.find("Game Engine Initialized") != std::string::npos)
+                return true;
+        }
+        Sleep(250);
+    }
+    return false;
+}
+
 int wmain(int argc, wchar_t** argv)
 {
     if (argc < 3)
@@ -86,6 +160,9 @@ int wmain(int argc, wchar_t** argv)
 
     std::wstring gameDir = DirOf(exePath);
 
+    FILETIME bootStart{};
+    GetSystemTimeAsFileTime(&bootStart);
+
     if (!CreateProcessW(exePath.c_str(), cmd.data(), nullptr, nullptr, FALSE,
                         CREATE_SUSPENDED, nullptr, gameDir.c_str(), &si, &pi))
         Fail("CreateProcessW(CREATE_SUSPENDED)", GetLastError());
@@ -95,13 +172,12 @@ int wmain(int argc, wchar_t** argv)
     if (ResumeThread(pi.hThread) == (DWORD)-1)
         Fail("ResumeThread", GetLastError());
 
-    DWORD idle = WaitForInputIdle(pi.hProcess, 30000);
-    if (idle == WAIT_FAILED)
-        fprintf(stderr, "[ogfn] WaitForInputIdle failed, continuing: %lu\n",
-                (unsigned long)GetLastError());
-
-    fprintf(stdout, "[ogfn] client input-idle=%d, settling %lu ms for section unpack\n",
-            (int)idle, (unsigned long)settleMs);
+    // Engine-ready gate (matches the official launcher's wait on the client log).
+    fprintf(stdout, "[ogfn] waiting for Game Engine Initialized (up to 60s)\n");
+    fflush(stdout);
+    bool engineReady = WaitForEngineInit(bootStart, 60000);
+    fprintf(stdout, "[ogfn] engine gate: %s; settling %lu ms\n",
+            engineReady ? "READY" : "TIMED OUT, injecting anyway", (unsigned long)settleMs);
     fflush(stdout);
     Sleep(settleMs);
 
