@@ -28,6 +28,7 @@
 #include "Fonts/ruda-bold.h"
 #include "Vector.h"
 #include "reboot.h"
+#include "ogfn_locker.h"
 #include "botnames.h"
 #include "FortGameModeAthena.h"
 #include "UnrealString.h"
@@ -85,10 +86,10 @@ extern inline int NumRequiredPlayersToStart = 2;
 extern inline bool bDebugPrintLooting = false;
 extern inline bool bDebugPrintFloorLoot = false;
 extern inline bool bDebugPrintSwapping = false;
-extern inline bool bEnableBotTick = false;
+extern inline bool bEnableBotTick = true;
 extern inline bool bZoneReversing = false;
 extern inline bool bEnableCombinePickup = false;
-extern inline int AmountOfBotsToSpawn = 0;
+extern inline int AmountOfBotsToSpawn = 20;
 extern inline int WarmupRequiredPlayerCount = 1;
 extern inline bool bEnableRebooting = false;
 extern inline bool bEngineDebugLogs = false;
@@ -343,7 +344,7 @@ static inline void StaticUI()
 		}
 	}
 
-	// ImGui::InputInt("Amount of bots to spawn", &AmountOfBotsToSpawn);
+	ImGui::InputInt("Amount of bots to spawn", &AmountOfBotsToSpawn);
 
 	ImGui::Checkbox("Infinite Ammo", &Globals::bInfiniteAmmo);
 	ImGui::Checkbox("Infinite Materials", &Globals::bInfiniteMaterials);
@@ -369,6 +370,12 @@ static inline void MainTabs()
 			Tab = GAME_TAB;
 			PlayerTab = -1;
 			bInformationTab = false;
+			ImGui::EndTabItem();
+		}
+
+		if (ImGui::BeginTabItem("OGFN Locker"))
+		{
+			OgfnLocker::Render();
 			ImGui::EndTabItem();
 		}
 

@@ -349,8 +349,6 @@ namespace Bots
 
 	static void SpawnBotsAtPlayerStarts(int AmountOfBots)
 	{
-		return;
-
 		auto GameState = Cast<AFortGameStateAthena>(GetWorld()->GetGameState());
 		auto GameMode = Cast<AFortGameModeAthena>(GetWorld()->GetGameMode());
 
@@ -372,11 +370,11 @@ namespace Bots
 
 		for (int i = 0; i < AmountOfBots; ++i)
 		{
-			AActor* PlayerStart = PlayerStarts.at(std::rand() % (PlayerStarts.size() - 1));
+			AActor* PlayerStart = PlayerStarts.at(PlayerStarts.size() > 1 ? (std::rand() % (PlayerStarts.size() - 1)) : 0);
 
 			if (!PlayerStart)
 			{
-				return;
+				continue;
 			}
 
 			auto NewBot = SpawnBot(PlayerStart->GetTransform(), PlayerStart);
