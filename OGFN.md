@@ -4,6 +4,53 @@ Fork base: **Milxnor/Project-Reboot-3.0** at `10c6590` ("automate recomp", 2026-
 BSD-3-Clause -- license and notices untouched; everything added in this fork is in addition to,
 not a replacement of, upstream code. This branch: `ogfn/bots-online`.
 
+## Architecture (settled 2026-10-18)
+
+TWO processes, one law: **the DLL instance is the gameserver, the plain instance is you.**
+
+| piece | how it runs | what it is |
+|---|---|---|
+| `OGFN-BACKEND` task | LawinV1 (GPL-3, own dir `C:\ogfn\backend`), Node, ports 3551 + XMPP 80 | auth, profiles, storefront, matchmaker -> `ip=127.0.0.1 port=7777` from its `Config/config.ini` |
+| `OGFN-PROXY` task | mitmproxy venv `C:\ogfn\mitm`, 127.0.0.1:8980, `ops/ogfn_redirect.py`, **requires `connection_strategy=lazy`** | TLS-terminating rewrite of `*.epicgames.com` to the backend (Lawin's documented Fiddler recipe); `.dev` hosts deliberately untouched so live EGS keeps working |
+| `OGFN-PLAY` task | `start.ps1`: health-checks services -> session proxy on -> starts the client -> **waits for the engine-ready log line** -> injects `Reboot.dll` | the SERVER: flips GIsServer, opens Athena_Terrain, listens on **UDP 7777** (TCP probes will lie to you), spawns 20 RebootBots, removes its own local player -- its window is a dead UI BY DESIGN, minimize it |
+| `OGFN-CLIENT` task | same client exe, **no DLL**, same auth argv | YOUR game window: menu, PLAY, matchmaker -> 127.0.0.1:7777 -> your own island |
+| `OGFN-PROXYGUARD` | at logon, clears stale ProxyEnable | a hard power-off mid-session leaves ProxyEnable=1 pointing at a dead proxy; this makes that unloseable |
+
+Boot argv is load-bearing (the naked 2018 client self-exits at ~2s with code 0 without it):
+`-obfuscationid=... -AUTH_LOGIN=TreXito -AUTH_PASSWORD=Rebooted -AUTH_TYPE=exchangecode
+-epicapp=Fortnite -epicenv=Prod -EpicPortal -epicusername=TreXito -epiclocale=en
+-epicsandboxid=fn -log`.
+
+The client libcurl runs `bVerifyPeer=false` and honors the system proxy, so the redirect needs
+no certificate trickery beyond the mitm CA already in Root (`certutil -delstore Root mitmproxy`
+to roll back).
+
+## Runbook: cold start to playable (Windows box)
+
+1. `schtasks /run /tn OGFN-BACKEND` ; `schtasks /run /tn OGFN-PROXY` (or just let start.ps1
+   health-check them -- it starts both when down).
+2. `powershell -ExecutionPolicy Bypass -File C:\ogfn\src\build.ps1` -- if the game windows are
+   open, close them first or the linker loses the PDB (LNK1201).
+3. `schtasks /run /tn OGFN-PLAY` -- wait ~15 s: `reboot.log` must show `ogfn: pinned client`
+   -> `brains online: first fleet size 20` -> `verbs: ...` -> `zone fields: ...` -> `armed: ...`.
+   The server window appearing then freezing is CORRECT.
+4. `schtasks /run /tn OGFN-CLIENT` -- your window. Pick BR, PLAY, island, bus.
+5. Evidence streams if anything misbehaves: `C:\ogfn\backend.log` (every HTTP request),
+   `C:\ogfn\requests.log` (every mitm rewrite), `reboot.log` (gameserver + brains),
+   `%LOCALAPPDATA%\FortniteGame\Saved\Logs\FortniteGame.log` (engine truth),
+   `C:\ogfn\dumps\` (LocalDumps armed: full minidumps + PDB next to the build),
+   `C:\ogfn\widlist.txt` / `C:\ogfn\cidlist.txt` (runtime catalogs).
+
+## First-compile risk inventory (adapter never MSVC-checked yet)
+
+Windows was offline when `ogfn-brain-adapter.cpp` was written. The known traps are already
+handled (ASCII-only, braced log-macro bodies, initialized extern-inlines, const-ref vs the
+fork's non-const FVector operators, PCH=NotUsing, g++ syntax-check of the vendored brain).
+If the first build still complains, it will be one of: `<utility>` include for `std::pair` in
+brain.h under MSVC, `FRotator` aggregate-init, `TArray::At/Num` constness, or `Rng`
+copyability in `Mind::Reseed` -- all one-line fixes, iterate straight from the build log.
+
+
 ## Why this shape (decisions, for the future reader)
 
 * **No backend, no FakeMCP, no SSL redirector.** Reboot has no login surface (verified:
