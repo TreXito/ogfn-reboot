@@ -1,4 +1,4 @@
-# OGFN build — builds Reboot.dll (gameserver) + OgfnInjector.exe.
+# OGFN build -- builds Reboot.dll (gameserver) + OgfnInjector.exe.
 # Requires Visual Studio 2022 with the "Desktop development with C++" workload (v143 toolset).
 # Usage:  powershell -ExecutionPolicy Bypass -File .\build.ps1
 
@@ -39,7 +39,7 @@ $dll = Get-ChildItem -Path $here -Recurse -Filter "Project Reboot 3.0.dll" -Erro
 $exe = Get-ChildItem -Path $here -Recurse -Filter "OgfnInjector.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
 
 if (-not $dll -or -not $exe) {
-    Write-Host "built, but could not locate outputs — build config changed upstream?"; exit 1
+    Write-Host "built, but could not locate outputs -- build config changed upstream?"; exit 1
 }
 
 Copy-Item $dll.FullName (Join-Path $out "Reboot.dll")      -Force

@@ -1,4 +1,4 @@
-# OGFN play — one action: spins up FortniteClient with the gameserver DLL injected.
+# OGFN play -- one action: spins up FortniteClient with the gameserver DLL injected.
 # Usage:  powershell -ExecutionPolicy Bypass -File .\start.ps1 -GameDir "C:\ogfn\3.5" [-NoLog]
 # Tip:    leave -NoLog off to get a readable server log window (UE -log).
 
@@ -35,4 +35,4 @@ Write-Host ""
 Write-Host ""
 Write-Host "in-game: the console overlay toggles with your GUI key if configured;"
 Write-Host "match starts on its own (warmup 1 player, 20 bots). The 'OGFN Locker' tab has all "
-Write-Host "Season 3 skins + emotes — pick one, Apply, live."
+Write-Host "Season 3 skins + emotes -- pick one, Apply, live."

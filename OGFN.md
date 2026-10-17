@@ -66,8 +66,8 @@ Boot is solo: match starts when players-left >= 1, which any bot fulfils.
 * `build.ps1` — VS2022 discovery via vswhere, then `MSBuild` on the upstream `.sln` (game DLL,
   Release x64) and the injector `.vcxproj`. Copies outputs to `out\` and tells you the next
   command. Fails loudly with the VS download link when the workload is missing.
-* `download-client.ps1` — S3 client 3.5.0 CL-4008490 from `galaxiafn.co.uk/3.5.zip`
-  (verified live on 2026-10-17; the `builds.rebootfn.org` mirror 404s). BITS (resumable),
+* `download-client.ps1` — S3 client 3.5.0 CL-4008490 from `archive.org/download/fn-v3-archive` (the `builds.rebootfn.org`
+  and `galaxiafn.co.uk` mirrors from the builds index are both dead: 404 / parked domain). BITS (resumable),
   7-Zip auto-install if absent, extracts, verifies the shipping exe, tells you the next command.
 * `start.ps1` — builds the full command line and runs the injector; `-NoLog` to skip UE `-log`
   console window (leave it on: server log readability is the diagnostic).
