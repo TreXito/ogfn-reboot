@@ -20,10 +20,10 @@
 namespace OgfnLocker
 {
 	extern inline bool bPopulated = false;
-	extern inline std::vector<UObject*> Characters; // AthenaCharacterItemDefinition
-	extern inline std::vector<UObject*> Emotes;     // AthenaDanceItemDefinition
-	extern inline std::vector<std::string> CharacterNames;
-	extern inline std::vector<std::string> EmoteNames;
+	extern inline std::vector<UObject*> Characters = {}; // AthenaCharacterItemDefinition
+	extern inline std::vector<UObject*> Emotes = {};     // AthenaDanceItemDefinition
+	extern inline std::vector<std::string> CharacterNames = {};
+	extern inline std::vector<std::string> EmoteNames = {}
 
 	extern inline int SelectedCharacter = -1;
 	extern inline int SelectedEmote = -1;
