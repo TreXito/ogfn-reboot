@@ -21,6 +21,24 @@
 
 void Addresses::SetupVersion()
 {
+	// OGFN PIN: this server is deployed against exactly one client build:
+	// 3.5.0 (Chapter 1 Season 3), CL-4008490, Unreal Engine 4.20.
+	// The runtime detection below is fragile on this 2018 binary: any pattern scan miss
+	// feeds garbage into std::stod/stoi, which throws; uncaught that reaches
+	// std::terminate -> abort -> the "Runtime to terminate in an unusual way" box
+	// (observed 2026-10-17 19:04 with two log lines then death). Pin the authoritative
+	// values and skip detection entirely for this deployment.
+	Fortnite_CL = 4008490;
+	Fortnite_Version = 3.5;
+	Engine_Version = 420;
+
+	LOG_INFO(LogInit, "ogfn: pinned client 3.5.0 CL-4008490 (UE 4.20); runtime detection skipped.");
+
+	return;
+
+	// Original detection body follows, unreachable for this pinned deployment.
+	// Left intact for a future non-pinned target.
+
 	static FString(*GetEngineVersion)() = decltype(GetEngineVersion)(Memcury::Scanner::FindPattern("40 53 48 83 EC 20 48 8B D9 E8 ? ? ? ? 48 8B C8 41 B8 04 ? ? ? 48 8B D3", false).Get());
 
 	std::string FullVersion;
