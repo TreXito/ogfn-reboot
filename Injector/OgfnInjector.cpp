@@ -95,7 +95,7 @@ int wmain(int argc, wchar_t** argv)
     if (ResumeThread(pi.hThread) == (DWORD)-1)
         Fail("ResumeThread", GetLastError());
 
-    DWORD idle = WaitForInputIdle(pi.hThread, 30000);
+    DWORD idle = WaitForInputIdle(pi.hProcess, 30000);
     if (idle == WAIT_FAILED)
         fprintf(stderr, "[ogfn] WaitForInputIdle failed, continuing: %lu\n",
                 (unsigned long)GetLastError());

@@ -24,8 +24,18 @@ if (-not $exe) { Write-Host "FortniteClient-Win64-Shipping.exe not found under '
 
 $dll = (Resolve-Path $DllPath).Path
 $client = $exe.FullName
-$args = @()
-if (-not $NoLog) { $args = @("-log") }
+
+# Boot arguments the 2018 client needs to skip the real Epic ecosystem. Without these
+# the naked shipping client phones home, spawns the installed Epic Games launcher, and
+# bows out (seen live on 2026-10-17). Mirrors what Reboot-Launcher itself passes:
+# -AUTH_LOGIN=<username>, -AUTH_PASSWORD=Rebooted, -AUTH_TYPE=epic, -epicapp=Fortnite.
+$args = @(
+    "-AUTH_LOGIN=TreXito",
+    "-AUTH_PASSWORD=Rebooted",
+    "-AUTH_TYPE=epic",
+    "-epicapp=Fortnite"
+)
+if (-not $NoLog) { $args = $args + @("-log") }
 
 Write-Host "client:  $client"
 Write-Host "dll:     $dll"
