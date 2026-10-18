@@ -27,6 +27,7 @@ namespace Harness { extern double g_now; }
 inline double HarnessNow() { return Harness::g_now; }
 
 // MSVC CRT call the adapter uses on the real build; shim it for glibc here.
+inline int DeleteFileA(const char*) { return 1; } // Win32 DeleteFile, shimmed
 inline int fopen_s(FILE** out, const char* name, const char* mode)
 {
 	*out = std::fopen(name, mode);
