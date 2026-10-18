@@ -163,6 +163,10 @@ int main()
 	TickFor(1.0);
 	EXPECT(P0->rotationCount == rotBeforeWarmup, "warmup: bots stand still (no rotation act)");
 	world.GS->Phase = EAthenaGamePhase::Setup;
+	int rotBeforeSetup = P0->rotationCount;
+	TickFor(1.0);
+	EXPECT(P0->rotationCount == rotBeforeSetup, "setup island: combat gate closed (no act, no fire)");
+	world.GS->Phase = EAthenaGamePhase::SafeZones;
 
 	// ---------- P1: lobby, no enemies ----------
 	std::printf("\n-- P1: no enemies, act enabled (2s) --\n");
@@ -179,7 +183,7 @@ int main()
 
 	// ---------- P2: enemy in front, LOS clear ----------
 	std::printf("\n-- P2: enemy 25m dead ahead, clear LOS (6s) --\n");
-	EnemyPawn->Location = FVector(2500.f, 0.f, 0.f); // 25 m
+	EnemyPawn->Location = FVector(1500.f, 0.f, 0.f); // 15 m: persona-unambiguous (at 25 m a passive ASLR-seeded persona lets HoldAngle outscore Engage and P2 flakes)
 	double p2Start = Harness::g_now;
 	TickFor(6.0);
 

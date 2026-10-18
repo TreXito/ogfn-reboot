@@ -58,6 +58,7 @@ namespace
 		bool bArmed = false;
 		bool bAutoLanded = false;   // bus-dump place-once flag (see the auto-land block)
 		bool bNeedsReequip = false; // wave respawn: rebind the controller's rifle to the new pawn
+		int fireCount = 0;          // motor triggers pulled (evidence of sustained combat)
 		FGuid armGuid;              // guid of the granted rifle (equip-only path, no re-add)
 		double nextArmTry = 0.0;
 		double nextLandTry = 0.0;   // retry clock for a rejected ground probe
@@ -663,12 +664,16 @@ void TickAll()
 		bWarmup = (Phase == EAthenaGamePhase::Warmup);
 	}
 
+	// Combat gate: perception/motor ONLY in SafeZones (post-deploy). Setup is the
+	// spawn island: live evidence had bots gunning each other down 1s into Setup,
+	// which players cannot do. Arming, skin, zone/loot cache still run all phases.
+	bool bCombat = (Phase == EAthenaGamePhase::SafeZones);
 	{
 		static bool s_actOpen = false;
-		if (!bWarmup && !s_actOpen)
+		if (bCombat && !s_actOpen)
 		{
 			s_actOpen = true;
-			LOG_INFO(LogBots, "[ogfn] act-gate open: perception+motor live");
+			LOG_INFO(LogBots, "[ogfn] combat gate open at SafeZones: perception+motor live");
 		}
 	}
 
@@ -802,7 +807,7 @@ void TickAll()
 	static std::vector<EnemyPawn> Enemies;
 	Enemies.clear();
 	Enemies.reserve(bots.size() + 4);
-	if (!bWarmup)
+	if (bCombat)
 	{
 		for (auto& Bot : bots)
 		{
@@ -898,10 +903,8 @@ void TickAll()
 				LOG_INFO(LogBots, "[ogfn] auto-landed bot#{} land={} z={:.0f} -> ({:.0f},{:.0f},{:.0f})",
 					(int)i, (int)bRealLand, P.Z, Land.X, Land.Y, Land.Z);
 			}
-			else
-			{
-				M.bAutoLanded = true; // already on the ground: done, stop checking
-			}
+			// Ground pawns need no latch: the z>20000 gate alone self-terminates
+			// (probe only ever runs for high pawns, and a teleport ends that).
 		}
 		if (M.bNeedsReequip)
 		{
@@ -915,10 +918,10 @@ void TickAll()
 				M.nextArmTry = Now + 2.0;
 		}
 
-		if (bWarmup)
+		if (!bCombat)
 		{
-			M.lastTick = Now; // keep dt sane for the first in-match tick
-			continue;         // island: stand still, no perception load, no servo noise
+			M.lastTick = Now; // keep dt sane for the first combat tick
+			continue;         // island (Warmup/Setup): stand still, no servo, no fire
 		}
 
 		float dt = (float)(Now - M.lastTick);
@@ -1073,10 +1076,10 @@ void TickAll()
 					EDrawDebugTrace::None, true, FLinearColor(), FLinearColor(), 0.f, &SkyHit);
 				bool bSkyLos = !SkyHit || !SkyHit->IsBlockingHit();
 
-				LOG_INFO(LogBots, "[ogfn] track z={:.0f} pos=({:.0f},{:.0f}) n={} los={} shootable={} attached={} velZ={:.0f} skyLOS={} bus=({},{},{})",
+				LOG_INFO(LogBots, "[ogfn] track z={:.0f} pos=({:.0f},{:.0f}) n={} los={} shootable={} fired={} attached={} velZ={:.0f} skyLOS={} bus=({},{},{})",
 					W.self_pos.z, W.self_pos.x, W.self_pos.y,
 					(int)Obs.enemies.size(), (int)W.target_is_visible, (int)M.decision.fire,
-					(int)bAttached, velZ, (int)bSkyLos,
+					M.fireCount, (int)bAttached, velZ, (int)bSkyLos,
 					bGotBus ? BusLoc.X : -1.f, bGotBus ? BusLoc.Y : -1.f, bGotBus ? BusLoc.Z : -1.f);
 			}
 			if (&M == &g_minds[0] && Phase != s_obsPhase)
@@ -1135,6 +1138,7 @@ void TickAll()
 				s_firstFire = true;
 				LOG_INFO(LogBots, "[ogfn] first fire event (motor trigger pulled)");
 			}
+			M.fireCount++;
 			ApplyFire(Pawn);
 		}
 
