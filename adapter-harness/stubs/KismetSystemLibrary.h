@@ -18,11 +18,25 @@ struct UKismetSystemLibrary
 	                            FLinearColor, FLinearColor, float,
 	                            FHitResult** OutHit)
 	{
-		bool bClear = Harness::g_losFn ? Harness::g_losFn(Start, End) : true;
+		// Down-probe (dz beyond 5000uu): ground plane at z=0 under the start
+		// column. Everything else: the sim's LOS function (walls included).
+		bool bClear;
+		FVector HitLoc;
+		if (End.Z < Start.Z - 5000.f)
+		{
+			HitLoc = FVector(Start.X, Start.Y, 0.f);
+			bClear = false;
+		}
+		else
+		{
+			bClear = Harness::g_losFn ? Harness::g_losFn(Start, End) : true;
+			HitLoc = End;
+		}
 		if (OutHit)
 		{
 			auto* Hit = new FHitResult();
 			Hit->bBlocking = !bClear;
+			Hit->Location = HitLoc;
 			*OutHit = Hit;
 		}
 		return !bClear;

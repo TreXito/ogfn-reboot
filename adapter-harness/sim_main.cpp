@@ -127,6 +127,7 @@ int main()
 		RegisterFn(Pawn, "Jump", 0);
 		RegisterFn(Pawn, "AddMovementInput", 48);
 		RegisterFn(Pawn, "StartFire", 0);
+		RegisterFn(Pawn, "K2_SetActorLocation", 64);
 
 		auto PC = new AFortPlayerControllerAthena();
 		PC->Inventory = new AFortInventory();
@@ -215,6 +216,44 @@ int main()
 	EXPECT(moveDelta >= 8, "bot commits to movement toward the zone");
 	// Direction evidence: last movement input should point east (+X).
 	EXPECT(P0->lastMoveDir.X > 0.5f, "movement direction faces the zone (+X)");
+
+	// ---------- P5: forced bus-end dump -> auto-land ----------
+	// Live evidence this replicates: engine force-exits everyone at the bus's
+	// final transform; server-only pawns stay frozen at z=81536 (velZ=0, no
+	// attachment, never descend), so no combat ever happens. The adapter must
+	// place each pawn on the ground exactly once, spread off the dump point.
+	std::printf("\n-- P5: forced bus-end dump, auto-land (3s) --\n");
+	world.GS->Phase = EAthenaGamePhase::SafeZones;
+	for (auto& B : AllPlayerBotsToTick)
+		B.Pawn->Location = FVector(137002.f, -94136.f, 81536.f); // exact live dump coords
+	int teleBefore = P0->teleportCount;
+	TickFor(3.0);
+
+	EXPECT(P0->teleportCount == teleBefore + 1, "auto-land teleports a dumped pawn exactly once");
+	EXPECT(P0->Location.Z > 0.f && P0->Location.Z < 300.f, "bot0 placed on the ground (z in 0..300)");
+	EXPECT(P0->Location.X != 137002.f || P0->Location.Y != -94136.f, "bot0 left the dump point");
+	{
+		int teleTotal = 0, stillHigh = 0, movedCount = 0;
+		bool anyPairSame = false;
+		for (auto& B : AllPlayerBotsToTick)
+		{
+			teleTotal += B.Pawn->teleportCount;
+			if (B.Pawn->Location.Z > 20000.f) stillHigh++;
+			if (B.Pawn->Location.X != 137002.f || B.Pawn->Location.Y != -94136.f) movedCount++;
+		}
+		for (size_t x = 0; x < AllPlayerBotsToTick.size() && !anyPairSame; x++)
+			for (size_t y = x + 1; y < AllPlayerBotsToTick.size(); y++)
+				if (AllPlayerBotsToTick[x].Pawn->Location.X == AllPlayerBotsToTick[y].Pawn->Location.X &&
+				    AllPlayerBotsToTick[x].Pawn->Location.Y == AllPlayerBotsToTick[y].Pawn->Location.Y)
+				{
+					anyPairSame = true;
+					break;
+				}
+		EXPECT(teleTotal == (int)AllPlayerBotsToTick.size(), "every bot auto-landed exactly once (no doubles)");
+		EXPECT(stillHigh == 0, "nobody left frozen above the map");
+		EXPECT(movedCount == (int)AllPlayerBotsToTick.size(), "every pawn left the single dump point");
+		EXPECT(!anyPairSame, "no two bots share one landing coordinate (spread)");
+	}
 
 	// ---------- summary ----------
 	std::printf("\n=== summary ===\n");

@@ -5,7 +5,7 @@
 #include "reboot.h"
 
 // Mirrors the real enum name/values the adapter compares against.
-enum class EAthenaGamePhase : uint8_t { Warmup, Setup, Aircraft, EndGame };
+enum class EAthenaGamePhase : uint8_t { None = 0, Setup = 1, Warmup = 2, Aircraft = 3, SafeZones = 4, EndGame = 5 };
 
 struct AFortGameStateAthena : UObject
 {

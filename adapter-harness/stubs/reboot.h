@@ -50,7 +50,9 @@ struct FGuid { int v = 0; };
 struct FHitResult
 {
 	bool bBlocking = false;
+	FVector Location;                      // ground point for down-probes
 	bool IsBlockingHit() const { return bBlocking; }
+	FVector& GetLocation() { return Location; }
 };
 
 enum class ETraceTypeQuery { TraceTypeQuery1, TraceTypeQuery2 };
@@ -58,6 +60,15 @@ enum class EDrawDebugTrace { None, ForDuration };
 
 struct UFunction { std::string name; size_t paramsSize = 64; size_t GetPropertiesSize() const { return paramsSize; } };
 struct UClass { std::string name; };
+
+// Fork's offset finder (reboot.h). Layout constants match the adapter's
+// NewLocation-at-0 / bSweep-at-12 expectation for K2_SetActorLocation.
+inline int FindOffsetStruct(const std::string&, const std::string& Member, bool = true)
+{
+	if (Member == "NewLocation") return 0;
+	if (Member == "bSweep") return 12;
+	return -1;
+}
 
 struct UObject
 {
@@ -147,6 +158,8 @@ struct ProcessEventRecorder
 	int moveCount = 0;
 	int jumpCount = 0;
 	int fireCount = 0;
+	int teleportCount = 0;
+	FVector lastTeleport;
 	FRotator lastRotation;
 	FVector lastMoveDir;
 	std::vector<double> fireTimes;
@@ -173,6 +186,12 @@ struct AFortPlayerPawnAthena : AFortPawn, ProcessEventRecorder
 		else if (fn->name == "AddMovementInput" && params) { moveCount++; lastMoveDir = ((FVector*)params)[0]; }
 		else if (fn->name == "Jump") jumpCount++;
 		else if (fn->name == "StartFire") { fireCount++; fireTimes.push_back(HarnessNow()); }
+		else if (fn->name == "K2_SetActorLocation" && params)
+		{
+			teleportCount++;
+			lastTeleport = ((FVector*)params)[0]; // NewLocation at offset 0
+			Location = lastTeleport;
+		}
 	}
 };
 

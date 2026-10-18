@@ -35,6 +35,7 @@ namespace OgfnLocker { void AutoApplyOnce(); }  // provided by the harness stub
 #include <cmath>
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 
 namespace OgfnBot
 {
@@ -53,7 +54,9 @@ namespace
 		ogfn::Decision decision;
 		bool bSeeded = false;
 		bool bArmed = false;
+		bool bAutoLanded = false;   // bus-dump place-once flag (see the auto-land block)
 		double nextArmTry = 0.0;
+		double nextLandTry = 0.0;   // retry clock for a rejected ground probe
 		double lastTick = 0.0;
 
 		Mind() : persona(), brain(persona, 1), motor(persona, 1) {}
@@ -80,6 +83,7 @@ namespace
 		UFunction* moveCompFn = nullptr;   // AddInputVector on the movement component
 		UObject* moveComp = nullptr;
 		UFunction* jumpFn = nullptr;
+		UFunction* landFn = nullptr;   // K2_SetActorLocation (native fallback)
 		UFunction* fireFn = nullptr;
 		size_t fireParamsSize = 0;
 		bool bFireResolved = false;
@@ -141,6 +145,9 @@ namespace
 		if (!g_verbs.rotateFn)
 			g_verbs.rotateFn = Pawn->FindFunction("K2_SetActorRotation");
 		g_verbs.jumpFn = Pawn->FindFunction("Jump");
+		g_verbs.landFn = Pawn->FindFunction("K2_SetActorLocation");
+		if (!g_verbs.landFn)
+			g_verbs.landFn = Pawn->FindFunction("SetActorLocation");
 		g_verbs.moveFn = Pawn->FindFunction("AddMovementInput");
 		if (!g_verbs.moveFn)
 			g_verbs.moveFn = Pawn->FindFunction("K2_AddMovementInput");
@@ -150,8 +157,9 @@ namespace
 		if (g_verbs.moveComp)
 			g_verbs.moveCompFn = g_verbs.moveComp->FindFunction("AddInputVector");
 
-		LOG_INFO(LogBots, "[ogfn] verbs: rotate={} jump={} move={} moveComp={}",
-			(__int64)g_verbs.rotateFn, (__int64)g_verbs.jumpFn, (__int64)g_verbs.moveFn, (__int64)g_verbs.moveCompFn);
+		LOG_INFO(LogBots, "[ogfn] verbs: rotate={} jump={} move={} moveComp={} land={}",
+			(__int64)g_verbs.rotateFn, (__int64)g_verbs.jumpFn, (__int64)g_verbs.moveFn,
+			(__int64)g_verbs.moveCompFn, (__int64)g_verbs.landFn);
 	}
 
 	void ResolveFire(AFortPlayerControllerAthena* Controller, AFortPlayerPawnAthena* Pawn)
@@ -231,6 +239,48 @@ namespace
 		// parms size and the "bots never shoot" symptom name the fix.
 		alignas(16) unsigned char buf[128] = {};
 		Pawn->ProcessEvent(g_verbs.fireFn, buf);
+	}
+
+	// Engine-sized params buffer for K2_SetActorLocation. ProcessEvent copies
+	// GetPropertiesSize() bytes in AND back out (the FHitResult out-parm lives in
+	// there), so a small hand-rolled struct would get out-parms written past its
+	// end. This is the same idiom the fork's own Kismet wrapper uses: offsets
+	// from FindOffsetStruct, engine-sized buffer, zero-filled.
+	void ApplyTeleport(AFortPlayerPawnAthena* Pawn, FVector NewLocation)
+	{
+		if (!g_verbs.landFn)
+			return;
+
+		static int s_locOff = -2;
+		static int s_sweepOff = -2;
+		static int s_size = 0;
+		static std::vector<unsigned char> s_buf;
+
+		if (s_locOff == -2)
+		{
+			// Both spellings share member names; whichever path exists wins.
+			s_locOff = FindOffsetStruct("/Script/Engine.Actor.K2_SetActorLocation", "NewLocation", false);
+			s_sweepOff = FindOffsetStruct("/Script/Engine.Actor.K2_SetActorLocation", "bSweep", false);
+			if (s_locOff < 0 || s_sweepOff < 0)
+			{
+				s_locOff = FindOffsetStruct("/Script/Engine.Actor.SetActorLocation", "NewLocation", false);
+				s_sweepOff = FindOffsetStruct("/Script/Engine.Actor.SetActorLocation", "bSweep", false);
+			}
+			s_size = (int)g_verbs.landFn->GetPropertiesSize();
+			if (s_locOff < 0 || s_sweepOff < 0 || s_size <= s_locOff + (int)sizeof(FVector) || s_size > 4096)
+			{
+				g_verbs.landFn = nullptr;
+				LOG_ERROR(LogBots, "[ogfn] teleport layout unusable: loc={} sweep={} size={}", s_locOff, s_sweepOff, s_size);
+				return;
+			}
+			s_buf.assign((size_t)s_size, 0);
+		}
+
+		if (!(NewLocation.X == NewLocation.X) || !(NewLocation.Y == NewLocation.Y) || !(NewLocation.Z == NewLocation.Z))
+			return; // NaN must never enter a transform
+		std::memcpy(s_buf.data() + s_locOff, &NewLocation, sizeof(FVector));
+		s_buf[(size_t)s_sweepOff] = 0; // bSweep = false
+		Pawn->ProcessEvent(g_verbs.landFn, s_buf.data());
 	}
 
 	void RefreshZone(double Now)
@@ -630,6 +680,68 @@ void TickAll()
 			ResolveVerbs(Pawn);
 		if (!g_verbs.bFireResolved)
 			ResolveFire(Controller, Pawn);
+
+		// Auto-land (bus-dump fix): on this build the engine's forced bus-end
+		// exit leaves server-only pawns frozen at the bus's last transform
+		// (live evidence: pos == bus loc to the millimeter, velZ=0, no attach,
+		// never descends, so combat never happens). Place the pawn on the ground
+		// under the drop column ourselves, once per pawn, spread on a golden-angle
+		// ring so a single-point dump does not become one stacked column of
+		// mutually occluded capsules. The probe starts 3000uu above the pawn so an
+		// early roof/actor hit cannot pass as ground; a near-start hit just
+		// retries after the aircraft actor tears down.
+		if (!bWarmup && Phase == EAthenaGamePhase::SafeZones && !M.bAutoLanded && Now >= M.nextLandTry)
+		{
+			auto P = Pawn->GetActorLocation();
+			if (P.Z > 20000.f)
+			{
+				FHitResult* Down = nullptr;
+				UKismetSystemLibrary::LineTraceSingle(Pawn,
+					P + FVector(0, 0, 3000.f), P + FVector(0, 0, -400000.f),
+					ETraceTypeQuery::TraceTypeQuery1, false, TArray<AActor*>(),
+					EDrawDebugTrace::None, true, FLinearColor(), FLinearColor(), 0.f, &Down);
+				if (Down && Down->IsBlockingHit())
+				{
+					FVector Landing = Down->GetLocation();
+					if (Landing.Z < P.Z - 1000.f)
+					{
+						float Angle = (float)i * 2.399963f; // golden angle: no stacking
+						float Radius = 400.f + (float)(i % 5) * 220.f;
+						Landing.X += std::cos(Angle) * Radius;
+						Landing.Y += std::sin(Angle) * Radius;
+						Landing.Z += 100.f;
+						ApplyTeleport(Pawn, Landing);
+						M.bAutoLanded = true;
+						LOG_INFO(LogBots, "[ogfn] auto-landed bot#{} z={:.0f} -> ({:.0f},{:.0f},{:.0f})",
+							(int)i, P.Z, Landing.X, Landing.Y, Landing.Z);
+					}
+					else
+					{
+						M.nextLandTry = Now + 2.0;
+						static bool s_nearHit = false;
+						if (!s_nearHit)
+						{
+							s_nearHit = true;
+							LOG_ERROR(LogBots, "[ogfn] auto-land: first hit near start, not ground (waiting for teardown)");
+						}
+					}
+				}
+				else
+				{
+					M.nextLandTry = Now + 2.0;
+					static bool s_noGround = false;
+					if (!s_noGround)
+					{
+						s_noGround = true;
+						LOG_ERROR(LogBots, "[ogfn] auto-land: no hit under drop column");
+					}
+				}
+			}
+			else
+			{
+				M.bAutoLanded = true; // already on the ground: done, stop checking
+			}
+		}
 		if (!M.bArmed && Now >= M.nextArmTry)
 		{
 			if (!TryArm(M, Controller))
