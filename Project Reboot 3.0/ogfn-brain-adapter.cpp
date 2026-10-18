@@ -39,6 +39,12 @@ namespace OgfnLocker { void AutoApplyOnce(); }  // provided by the harness stub
 
 namespace OgfnBot
 {
+#ifdef OGFN_HARNESS
+// Behavior-sim hook: P6 recreates the post-burst state (pawnless controllers that
+// were alive pre-deploy), which only occurs before a bot is ever seen in combat.
+void TestClearBurstState(size_t i);
+#endif
+
 namespace
 {
 	constexpr double kZoneRefreshSecs = 2.0;
@@ -61,6 +67,10 @@ namespace
 		bool bAutoLanded = false;   // bus-dump place-once flag (see the auto-land block)
 		bool bNeedsReequip = false; // wave respawn: rebind the controller's rifle to the new pawn
 		int fireCount = 0;          // motor triggers pulled (evidence of sustained combat)
+		bool bSeenAlive = false;    // has this bot been observed with a pawn IN-MATCH?
+		                            // burst victims never have (wave rescues them);
+		                            // killed bots do (wave must NOT resurrect them)
+		bool bElimLogged = false;   // one ELIMINATED line per bot
 		int moveCount = 0;          // move intents that reached ApplyMoveInput
 		FGuid armGuid;              // guid of the granted rifle (equip-only path, no re-add)
 		double nextArmTry = 0.0;
@@ -827,6 +837,8 @@ void TickAll()
 						continue;
 					if (PawnUsable(Cast<AFortPlayerPawnAthena>(WC->GetPawn())))
 						continue;
+					if (g_minds[wi].bSeenAlive)
+						continue; // died mid-match: elimination is final, no resurrection
 					pawnless++;
 					if (s_waveAttempt >= kWaveMaxAttempts)
 						continue;
@@ -855,6 +867,7 @@ void TickAll()
 						if (SpawnAt.Z <= 20000.f)
 							g_minds[wi].bAutoLanded = true; // on the ground already; else auto-land picks it up
 						g_minds[wi].bNeedsReequip = true;  // controller keeps the island rifle; bind it to this pawn
+						g_minds[wi].bElimLogged = false;
 						LOG_INFO(LogBots, "[ogfn] wave respawned bot#{} at ({:.0f},{:.0f},{:.0f})",
 							(int)wi, SpawnAt.X, SpawnAt.Y, SpawnAt.Z);
 					}
@@ -914,6 +927,47 @@ void TickAll()
 		}
 	}
 
+	// Fleet-wide match summary every 15s: the line the match report is built from
+	// (alive vs deployed vs eliminated, cumulative fire+move, live bbox spread).
+	{
+		static double s_nextFleet = 0.0;
+		if (Now >= s_nextFleet)
+		{
+			s_nextFleet = Now + 15.0;
+			int alive = 0, deployed = 0, elim = 0;
+			long long firedSum = 0, movSum = 0;
+			float minx = 1e9f, maxx = -1e9f, miny = 1e9f, maxy = -1e9f;
+			for (size_t fi = 0; fi < bots.size(); fi++)
+			{
+				auto& FB = bots[fi];
+				if (!FB.Controller || !FB.Controller->IsValidLowLevel())
+					continue;
+				auto FP = Cast<AFortPlayerPawnAthena>(FB.Controller->GetPawn());
+				if (PawnUsable(FP))
+				{
+					alive++;
+					auto FL = FP->GetActorLocation();
+					float mx = (float)FL.X * 0.01f, my = (float)FL.Y * 0.01f;
+					if (mx < minx) minx = mx;
+					if (mx > maxx) maxx = mx;
+					if (my < miny) miny = my;
+					if (my > maxy) maxy = my;
+				}
+				if (fi < g_minds.size())
+				{
+					if (g_minds[fi].bAutoLanded) deployed++;
+					if (g_minds[fi].bElimLogged) elim++;
+					firedSum += g_minds[fi].fireCount;
+					movSum += g_minds[fi].moveCount;
+				}
+			}
+			if (alive == 0)
+				minx = maxx = miny = maxy = 0.f;
+			LOG_INFO(LogBots, "[ogfn] fleet t={:.0f} alive={} deployed={} elim={} fired={} mov={} bbox=({:.0f}..{:.0f},{:.0f}..{:.0f})m",
+				Now, alive, deployed, elim, firedSum, movSum, minx, maxx, miny, maxy);
+		}
+	}
+
 	// Enemy pawn set for this pass: every other fleet bot plus every human client
 	// pawn, read FRESH from the controller each tick (respawns replace the cached
 	// PlayerBot.Pawn pointer, which never gets refreshed upstream).
@@ -964,9 +1018,22 @@ void TickAll()
 			continue;
 		auto Pawn = Cast<AFortPlayerPawnAthena>(Controller->GetPawn()); // fresh: respawns replace the cached pointer
 		if (!PawnUsable(Pawn))
+		{
+			// Deployed bot lost its pawn: in Athena that is elimination (no
+			// respawn mid-match). One line per bot for the match report. The
+			// wave runs earlier in this same tick, so a burst victim is already
+			// rescued before this gate is reached; only real deaths land here.
+			if (Phase == EAthenaGamePhase::SafeZones && i < g_minds.size()
+				&& g_minds[i].bAutoLanded && !g_minds[i].bElimLogged)
+			{
+				g_minds[i].bElimLogged = true;
+				LOG_INFO(LogBots, "[ogfn] ELIMINATED bot#{} t={:.0f}", (int)i, Now);
+			}
 			continue;
+		}
 
 		Mind& M = g_minds[i];
+		M.bSeenAlive = true; // combat-phase alive (gate below only reached post-combat)
 		if (!M.bSeeded)
 		{
 			uintptr_t key = (uintptr_t)Pawn;
@@ -1355,5 +1422,16 @@ void TickAll()
 		// decision.build_wall intentionally unwired: builder.h is the next pass.
 	}
 }
+
+#ifdef OGFN_HARNESS
+void TestClearBurstState(size_t i)
+{
+	if (i < g_minds.size())
+	{
+		g_minds[i].bSeenAlive = false;
+		g_minds[i].bElimLogged = false;
+	}
+}
+#endif
 
 } // namespace OgfnBot

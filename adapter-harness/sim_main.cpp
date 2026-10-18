@@ -32,6 +32,8 @@ namespace Harness
 // Harness stub for the real call-site in TickAll (locker lives in the fork).
 namespace OgfnLocker { void AutoApplyOnce() {} }
 
+namespace OgfnBot { void TestClearBurstState(size_t i); } // adapter (OGFN_HARNESS)
+
 static int g_failures = 0;
 #define EXPECT(cond, msg) do { \
 	if (cond) { std::printf("  PASS  %s\n", msg); } \
@@ -273,6 +275,7 @@ int main()
 	for (size_t x = 5; x < AllPlayerBotsToTick.size(); x++)
 	{
 		AllPlayerBotsToTick[x].Controller->MyPawn = nullptr; // burst-collision state
+		OgfnBot::TestClearBurstState(x); // they were never seen alive IN-MATCH
 		victims++;
 	}
 	TickFor(3.0);
