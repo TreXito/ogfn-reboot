@@ -473,9 +473,22 @@ namespace
 	// own trace call (BGA.h) passes the acting actor for exactly this reason.
 	bool CanSee(AFortPlayerPawnAthena* Self, FVector A, FVector B)
 	{
+		FVector S(A.X, A.Y, A.Z + kTraceEyeOffset);
+		FVector E(B.X, B.Y, B.Z + kTraceEyeOffset);
+		float dx = E.X - S.X, dy = E.Y - S.Y, dz = E.Z - S.Z;
+		float L = std::sqrt(dx * dx + dy * dy + dz * dz);
+		if (L <= 200.f)
+			return true; // nose to nose: nothing between two pawns this close
+		// STOP SHORT of the target: B is the neighbor's capsule CENTER, so an
+		// eye-to-eye trace ENDS inside their body and reports blocked for every
+		// proximate pawn. That was the entire live los=0 history (stacked pawns at
+		// the bus, ring neighbors on the mountain: every candidate is by definition
+		// a nearby pawn, so every trace ended in a capsule). 150uu short of center
+		// clears their capsule and keeps anything genuinely between us in the way.
+		float t = (L - 150.f) / L;
+		FVector End(S.X + dx * t, S.Y + dy * t, S.Z + dz * t);
 		FHitResult* Hit = nullptr;
-		UKismetSystemLibrary::LineTraceSingle(Self,
-			A + FVector(0, 0, kTraceEyeOffset), B + FVector(0, 0, kTraceEyeOffset),
+		UKismetSystemLibrary::LineTraceSingle(Self, S, End,
 			ETraceTypeQuery::TraceTypeQuery1, false, TArray<AActor*>(),
 			EDrawDebugTrace::None, /*bIgnoreSelf*/ true, FLinearColor(), FLinearColor(),
 			0.f, /*OutHit*/ &Hit);
