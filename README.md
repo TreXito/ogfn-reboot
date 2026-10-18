@@ -1,3 +1,8 @@
+> **Licensing**: Project Reboot 3.0 and vendored libraries keep their upstream
+> licenses (BSD-3, see LICENSE). Project-authored additions (adapter, behavior
+> harness, injector, match tooling) are MIT, see LICENSE-OGFN.md. This repository
+> contains no game assets or game data dumps.
+
 ## IMPORTANT: discord.gg/reboot is NOT us anymore!
 
 # New discord at discord.gg/rebootmp
