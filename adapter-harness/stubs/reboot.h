@@ -264,6 +264,12 @@ std::vector<T*> GetAllObjectsOfClass(UClass* c)
 	return out;
 }
 
+// Non-template overload (binds plain GetAllObjectsOfClass(x) calls, as the real fork has).
+inline std::vector<UObject*> GetAllObjectsOfClass(UClass* c)
+{
+	return GetAllObjectsOfClass<UObject>(c);
+}
+
 struct UGameplayStatics
 {
 	static TArray<AActor*> GetAllActorsOfClass(UWorld*, UClass* c)

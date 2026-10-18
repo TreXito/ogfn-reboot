@@ -416,7 +416,9 @@ namespace Bots
 
 			auto CurrentPawn = CurrentPlayer->GetPawn();
 
-			if (CurrentPawn->IsActorBeingDestroyed())
+			// Pawn goes momentarily null at phase transitions (Aircraft flip) --
+			// the unchecked deref crashed ReadBitfieldValue(NULL, 0x84) live.
+			if (!CurrentPawn || CurrentPawn->IsActorBeingDestroyed())
 				continue;
 
 			auto CurrentPlayerState = Cast<AFortPlayerStateAthena>(CurrentPlayer->GetPlayerState());

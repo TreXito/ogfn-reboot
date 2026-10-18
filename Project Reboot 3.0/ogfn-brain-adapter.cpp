@@ -26,6 +26,11 @@
 #include "FortSafeZoneIndicator.h"
 #include "FortWorldItemDefinition.h"
 #include "KismetSystemLibrary.h"
+#ifdef OGFN_HARNESS
+namespace OgfnLocker { void AutoApplyOnce(); }  // provided by the harness stub
+#else
+#include "ogfn_locker.h"
+#endif
 #include "ogfn/ogfn_bots.h"
 #include <cmath>
 #include <cstdio>
@@ -462,6 +467,11 @@ namespace
 // thank-the-driver, and its warmup hop (suppressed while brains are on).
 void TickAll()
 {
+	// The ReadyToStartMatch hook stops firing the moment the match commits (which is
+	// when a player actually joins), so the old call-site never saw a connected pawn.
+	// This runs every net tick; the call is a cheap gated no-op after success.
+	OgfnLocker::AutoApplyOnce();
+
 	if (!Globals::bInfiniteAmmo)
 	{
 		Globals::bInfiniteAmmo = true;

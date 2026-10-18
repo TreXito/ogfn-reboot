@@ -28,6 +28,9 @@ namespace Harness
 	std::function<bool(const FVector&, const FVector&)> g_losFn;
 }
 
+// Harness stub for the real call-site in TickAll (locker lives in the fork).
+namespace OgfnLocker { void AutoApplyOnce() {} }
+
 static int g_failures = 0;
 #define EXPECT(cond, msg) do { \
 	if (cond) { std::printf("  PASS  %s\n", msg); } \

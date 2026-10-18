@@ -175,6 +175,11 @@ inline uint8_t GetFieldMask(void* Property, int additional = 0)
 
 inline bool ReadBitfield(void* Addr, uint8_t FieldMask)
 {
+	// ogfn hardening: never deref a null/near-null bitfield address. A transient
+	// null object at phase transitions used to become an unhandled AV (reboot.h:183).
+	if ((uintptr_t)Addr < 0x10000)
+		return false;
+
 	auto Bitfield = (PlaceholderBitfield*)Addr;
 
 	// niceeeee
@@ -203,6 +208,9 @@ inline bool ReadBitfield(void* Addr, uint8_t FieldMask)
 
 inline void SetBitfield(void* Addr, uint8_t FieldMask, bool NewVal)
 {
+	if ((uintptr_t)Addr < 0x10000)
+		return;
+
 	auto Bitfield = (PlaceholderBitfield*)Addr;
 
 	// niceeeee

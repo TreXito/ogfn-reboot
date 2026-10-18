@@ -115,7 +115,10 @@ namespace OgfnLocker
 
 		auto CID = Characters.at(Index);
 
-		if (ApplyCID(Pawn, CID))
+		// bUseServerChoosePart=true: the ApplyCharacterCosmetics path dies on this
+		// build (its CustomCharacterParts struct lookup fails, warn in the log);
+		// ServerChoosePart is the same route the bots' own cosmetics take.
+		if (ApplyCID(Pawn, CID, true))
 		{
 			LOG_INFO(LogBots, "[ogfn] locker: applied {}.", CID->GetPathName());
 		}
