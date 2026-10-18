@@ -64,6 +64,7 @@ struct UObject
 	std::string name = "UObject";
 	std::map<std::string, int> offsets;          // GetOffset, missing = -1
 	std::map<int, float> floatSlots;             // Get<float>
+	std::map<int, FVector> vecSlots;             // Get<FVector>
 	std::map<int, UObject*> ptrSlots;            // Get<UObject*>
 	std::map<std::string, UFunction*> functions; // FindFunction
 
@@ -91,10 +92,28 @@ struct UObject
 			auto it = ptrSlots.find(off);
 			return it == ptrSlots.end() ? nullptr : it->second;
 		}
+		else if constexpr (std::is_same_v<T, FVector>)
+		{
+			auto it = vecSlots.find(off);
+			return it == vecSlots.end() ? FVector() : it->second;
+		}
+		else if constexpr (std::is_pointer_v<T>)
+		{
+			auto it = ptrSlots.find(off);
+			return it == ptrSlots.end() ? nullptr : reinterpret_cast<T>(it->second);
+		}
 		else
 		{
 			static_assert(sizeof(T) == 0, "stub Get<T>: only the types the adapter uses are modeled");
 		}
+	}
+
+	// Raw struct-at-offset pointer (fork's GetPtr<T>): generic by design.
+	template <typename T>
+	T* GetPtr(int off)
+	{
+		static char s_buf[256] = {};
+		return reinterpret_cast<T*>(s_buf);
 	}
 
 	virtual UFunction* FindFunction(const std::string& n)

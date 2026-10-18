@@ -724,9 +724,80 @@ void TickAll()
 			if (&M == &g_minds[0] && Now >= s_nextTrack)
 			{
 				s_nextTrack = Now + 15.0;
-				LOG_INFO(LogBots, "[ogfn] track z={:.0f} pos=({:.0f},{:.0f}) n={} los={} shootable={}",
+
+				// Why is bot0 frozen at bus altitude? Three facts per sample:
+				// root-scene-component AttachParent (parked on the bus?), the movement
+				// component's Z velocity (physics ticking?), and the aircraft actor's
+				// own location (is the pawn == the bus?).
+				bool bAttached = false;
+				float velZ = -999999.f;
+				auto RootOff = Pawn->GetOffset("RootComponent", false);
+				if (RootOff != -1)
+				{
+					if (auto Root = Pawn->Get<UObject*>(RootOff))
+					{
+						auto ParentOff = Root->GetOffset("AttachParent", false);
+						if (ParentOff != -1)
+							bAttached = Root->Get<UObject*>(ParentOff) != nullptr;
+					}
+				}
+				auto MoveOff = Pawn->GetOffset("CharacterMovement", false);
+				if (MoveOff != -1)
+				{
+					if (auto Move = Pawn->Get<UObject*>(MoveOff))
+					{
+						auto VelOff = Move->GetOffset("Velocity", false);
+						if (VelOff != -1)
+							velZ = Move->Get<FVector>(VelOff).Z;
+					}
+				}
+
+				FVector BusLoc;
+				bool bGotBus = false;
+				if (auto GS = Cast<AFortGameStateAthena>(World->GetGameState()))
+				{
+					int airOff = GS->GetOffset("Aircrafts", false);
+					if (airOff != -1)
+					{
+						auto Aircrafts = GS->GetPtr<TArray<AActor*>>(airOff);
+						if (Aircrafts && Aircrafts->Num() > 0)
+						{
+							auto Bus = Aircrafts->at(0);
+							if (Bus)
+							{
+								BusLoc = Bus->GetActorLocation();
+								bGotBus = true;
+							}
+						}
+					}
+					else
+					{
+						int oneOff = GS->GetOffset("Aircraft", false);
+						if (oneOff != -1)
+						{
+							if (auto Bus = GS->Get<AActor*>(oneOff))
+							{
+								BusLoc = Bus->GetActorLocation();
+								bGotBus = true;
+							}
+						}
+					}
+				}
+
+				// Synthetic LOS sanity probe: self straight up into empty sky.
+				// If THIS reports blocked, the trace pipeline itself is broken.
+				FHitResult* SkyHit = nullptr;
+				UKismetSystemLibrary::LineTraceSingle(Pawn,
+					SelfLoc + FVector(0, 0, 200.f), SelfLoc + FVector(0, 0, 1500.f),
+					ETraceTypeQuery::TraceTypeQuery1, false, TArray<AActor*>(),
+					EDrawDebugTrace::None, true, FLinearColor(), FLinearColor(), 0.f, &SkyHit);
+				bool bSkyLos = !SkyHit || !SkyHit->IsBlockingHit();
+
+				LOG_INFO(LogBots, "[ogfn] track z={:.0f} pos=({:.0f},{:.0f}) n={} los={} shootable={} attached={} velZ={:.0f} skyLOS={} bus=({},{},{})",
 					W.self_pos.z, W.self_pos.x, W.self_pos.y,
-					(int)Obs.enemies.size(), (int)W.target_is_visible, (int)M.decision.fire);
+					(int)Obs.enemies.size(), (int)W.target_is_visible, (int)M.decision.fire,
+					(int)bAttached, velZ, (int)bSkyLos,
+					bGotBus ? BusLoc.X : -1.f, bGotBus ? BusLoc.Y : -1.f, bGotBus ? BusLoc.Z : -1.f);
 			}
 			if (&M == &g_minds[0] && Phase != s_obsPhase)
 			{
