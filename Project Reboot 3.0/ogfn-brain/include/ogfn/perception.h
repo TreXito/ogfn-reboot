@@ -57,6 +57,7 @@ class Perception {
   bool has_visible_target() const { return nearest(true) != nullptr; }
 
  private:
+  Vec3 last_self_pos_{};  // nearest() must rank by distance to SELF, not to world origin
   PerceptionConfig cfg_;
   std::vector<TrackedTarget> targets_;
   double last_time_ = 0.0;

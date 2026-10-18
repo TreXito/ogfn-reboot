@@ -25,6 +25,7 @@ TrackedTarget* find(std::vector<TrackedTarget>& v, int id) {
 void Perception::update(const Observation& obs, double now) {
   const float dt = clampf(static_cast<float>(now - last_time_), 0.f, cfg_.max_dt);
   last_time_ = now;
+  last_self_pos_ = obs.self_pos;
   for (auto& t : targets_) t.visible = false;
 
   for (const auto& e : obs.enemies) {
@@ -69,7 +70,11 @@ const TrackedTarget* Perception::nearest(bool require_visible) const {
   float best_dist = 1e9f;
   for (const auto& t : targets_) {
     if (require_visible && !t.visible) continue;
-    const float d = length(t.last_seen_pos);
+    // Distance to SELF: length(pos) is distance to world origin, which coincides
+    // only while self sits at (0,0,0) -- true in every test, false for every live
+    // bot (that bug made nearest() rank targets by distance-to-origin and the
+    // servo chase bears it could never settle on).
+    const float d = length(t.last_seen_pos - last_self_pos_);
     if (d < best_dist) {
       best_dist = d;
       best = &t;

@@ -42,6 +42,8 @@ namespace OgfnBot
 namespace
 {
 	constexpr double kZoneRefreshSecs = 2.0;
+	constexpr float kBotWalkSpeed = 600.f;   // uu/s, human jog; locomotion is kinematic
+	                                         // (sweep-teleport steps): CharMoveComp never ticks here.
 		constexpr double kWaveCadenceSecs = 2.0;
 		constexpr int kWaveMaxAttempts = 30;
 	constexpr double kLootRefreshSecs = 0.5;
@@ -260,13 +262,22 @@ namespace
 	// there), so a small hand-rolled struct would get out-parms written past its
 	// end. This is the same idiom the fork's own Kismet wrapper uses: offsets
 	// from FindOffsetStruct, engine-sized buffer, zero-filled.
-	void ApplyTeleport(AFortPlayerPawnAthena* Pawn, FVector NewLocation)
+	// Engine-sized params buffer for K2_SetActorLocation. ProcessEvent copies
+	// GetPropertiesSize() bytes in AND back out (the FHitResult out-parm and the
+	// ReturnValue live in there), so a small hand-rolled struct would get
+	// out-parms written past its end. bSweep=true makes the engine sweep the
+	// capsule to the destination: that is what gives kinematic (physics-less)
+	// walking its collision behavior, since CharMoveComp never ticks on this
+	// build (frozen velocity despite 30/s inputs, mode byte stuck at 6).
+	// Returns the engine's ReturnValue: false = the sweep did not get there.
+	bool ApplyTeleportEx(AFortPlayerPawnAthena* Pawn, FVector NewLocation, bool bSweep)
 	{
 		if (!g_verbs.landFn)
-			return;
+			return false;
 
 		static int s_locOff = -2;
 		static int s_sweepOff = -2;
+		static int s_rvOff = -2;
 		static int s_size = 0;
 		static std::vector<unsigned char> s_buf;
 
@@ -275,26 +286,40 @@ namespace
 			// Both spellings share member names; whichever path exists wins.
 			s_locOff = FindOffsetStruct("/Script/Engine.Actor.K2_SetActorLocation", "NewLocation", false);
 			s_sweepOff = FindOffsetStruct("/Script/Engine.Actor.K2_SetActorLocation", "bSweep", false);
+			s_rvOff = FindOffsetStruct("/Script/Engine.Actor.K2_SetActorLocation", "ReturnValue", false);
 			if (s_locOff < 0 || s_sweepOff < 0)
 			{
 				s_locOff = FindOffsetStruct("/Script/Engine.Actor.SetActorLocation", "NewLocation", false);
 				s_sweepOff = FindOffsetStruct("/Script/Engine.Actor.SetActorLocation", "bSweep", false);
+				s_rvOff = FindOffsetStruct("/Script/Engine.Actor.SetActorLocation", "ReturnValue", false);
 			}
 			s_size = (int)g_verbs.landFn->GetPropertiesSize();
 			if (s_locOff < 0 || s_sweepOff < 0 || s_size <= s_locOff + (int)sizeof(FVector) || s_size > 4096)
 			{
 				g_verbs.landFn = nullptr;
 				LOG_ERROR(LogBots, "[ogfn] teleport layout unusable: loc={} sweep={} size={}", s_locOff, s_sweepOff, s_size);
-				return;
+				return false;
 			}
+			if (s_rvOff < 0 || s_rvOff >= s_size)
+				s_rvOff = -1; // tolerate a build without the return flag
 			s_buf.assign((size_t)s_size, 0);
 		}
 
 		if (!(NewLocation.X == NewLocation.X) || !(NewLocation.Y == NewLocation.Y) || !(NewLocation.Z == NewLocation.Z))
-			return; // NaN must never enter a transform
+			return false; // NaN must never enter a transform
 		std::memcpy(s_buf.data() + s_locOff, &NewLocation, sizeof(FVector));
-		s_buf[(size_t)s_sweepOff] = 0; // bSweep = false
+		s_buf[(size_t)s_sweepOff] = bSweep ? 1 : 0;
+		if (s_rvOff >= 0)
+			s_buf[(size_t)s_rvOff] = 0;
 		Pawn->ProcessEvent(g_verbs.landFn, s_buf.data());
+		if (s_rvOff >= 0)
+			return s_buf[(size_t)s_rvOff] != 0;
+		return true;
+	}
+
+	void ApplyTeleport(AFortPlayerPawnAthena* Pawn, FVector NewLocation)
+	{
+		ApplyTeleportEx(Pawn, NewLocation, false);
 	}
 
 	void RefreshZone(double Now)
@@ -480,15 +505,15 @@ namespace
 		FVector E(B.X, B.Y, B.Z + kTraceEyeOffset);
 		float dx = E.X - S.X, dy = E.Y - S.Y, dz = E.Z - S.Z;
 		float L = std::sqrt(dx * dx + dy * dy + dz * dz);
-		if (L <= 200.f)
-			return true; // nose to nose: nothing between two pawns this close
 		// STOP SHORT of the target: B is the neighbor's capsule CENTER, so an
 		// eye-to-eye trace ENDS inside their body and reports blocked for every
 		// proximate pawn. That was the entire live los=0 history (stacked pawns at
 		// the bus, ring neighbors on the mountain: every candidate is by definition
 		// a nearby pawn, so every trace ended in a capsule). 150uu short of center
-		// clears their capsule and keeps anything genuinely between us in the way.
-		float t = (L - 150.f) / L;
+		// clears their capsule; for nose-to-nose range the probe stops at half
+		// distance instead (a wall between two adjacent pawns still crosses it,
+		// where an outright "visible" shortcut fired through the wall).
+		float t = (L > 200.f) ? (L - 150.f) / L : 0.5f;
 		FVector End(S.X + dx * t, S.Y + dy * t, S.Z + dz * t);
 		FHitResult* Hit = nullptr;
 		UKismetSystemLibrary::LineTraceSingle(Self, S, End,
@@ -699,6 +724,32 @@ void TickAll()
 						Move->ProcessEvent(g_moveCompSetModeFn, p);
 						LOG_INFO(LogBots, "[ogfn] SetMovementMode(Walking) sent to bot0");
 					}
+
+				// Zone resolver probe (one-shot): the engine log picked ring1
+				// Radius=80000 at (69368,-76410) while our snapshot reads a 40m
+				// ring at origin. Dump which candidate property carries radius on
+				// this build's indicator and GameState, and where the actor sits.
+				auto GSz = Cast<AFortGameStateAthena>(World->GetGameState());
+				static const char* kZoneCands[] = { "NextRadius", "Radius", "CurrentRadius",
+					"ZoneRadius", "NextLocation", "NextCenter" };
+				for (auto Cname : kZoneCands)
+				{
+					int gOff = GSz ? GSz->GetOffset(Cname, false) : -1;
+					int iOff = g_zoneActor ? g_zoneActor->GetOffset(Cname, false) : -1;
+					float gVal = (gOff != -1) ? GSz->Get<float>(gOff) : -999999.f;
+					float iVal = (iOff != -1) ? g_zoneActor->Get<float>(iOff) : -999999.f;
+					LOG_INFO(LogBots, "[ogfn] zone probe {}: gs={:.0f} ind={:.0f}", Cname, gVal, iVal);
+				}
+				if (g_zoneActor)
+				{
+					auto ZL = g_zoneActor->GetActorLocation();
+					LOG_INFO(LogBots, "[ogfn] zone probe: indicator at ({:.0f},{:.0f},{:.0f})",
+						ZL.X, ZL.Y, ZL.Z);
+				}
+				else
+				{
+					LOG_ERROR(LogBots, "[ogfn] zone probe: NO indicator actor found");
+				}
 				}
 			}
 		}
@@ -823,6 +874,41 @@ void TickAll()
 				else
 				{
 					s_waveAttempt = 0;
+				}
+			}
+		}
+	}
+
+	// Jump probe verdict (per tick, NOT on the 15s track cadence): 60 ticks
+	// after sending Jump to wave pawn#5, did its Z ever move? Answers whether
+	// CharacterMovement integrates anything at all.
+	{
+		static bool s_jumpProbe = false;
+		static int s_jumpFollow = 0;
+		static float s_jumpZ0 = 0.f;
+		static float s_jumpDzMax = 0.f;
+		if (bCombat && bots.size() > 5 && bots[5].Controller)
+		{
+			auto P5 = Cast<AFortPlayerPawnAthena>(bots[5].Controller->GetPawn());
+			if (PawnUsable(P5))
+			{
+				float Z5 = P5->GetActorLocation().Z;
+				if (!s_jumpProbe)
+				{
+					s_jumpProbe = true;
+					s_jumpFollow = 60;
+					s_jumpZ0 = Z5;
+					ApplyJump(P5);
+					LOG_INFO(LogBots, "[ogfn] jump probe: sent Jump verb to wave pawn#5");
+				}
+				else if (s_jumpFollow > 0)
+				{
+					s_jumpFollow--;
+					float dz = Z5 - s_jumpZ0;
+					if (dz > s_jumpDzMax)
+						s_jumpDzMax = dz;
+					if (s_jumpFollow == 0)
+						LOG_INFO(LogBots, "[ogfn] jump probe outcome: dzmax={:.1f}uu over 2s", s_jumpDzMax);
 				}
 			}
 		}
@@ -1090,28 +1176,7 @@ void TickAll()
 						P5Loc = P5->GetActorLocation();
 						P5Z = P5Loc.Z;
 						bGotP5 = true;
-						static bool s_jumpProbe = false;
-						static int s_jumpFollow = 0;
-						static float s_jumpZ0 = 0.f;
-						static float s_jumpDzMax = 0.f;
-						if (!s_jumpProbe)
-						{
-							s_jumpProbe = true;
-							s_jumpFollow = 60;
-							s_jumpZ0 = P5Z;
-							s_jumpDzMax = 0.f;
-							ApplyJump(P5);
-							LOG_INFO(LogBots, "[ogfn] jump probe: sent Jump verb to wave pawn#5");
-						}
-						else if (s_jumpFollow > 0)
-						{
-							s_jumpFollow--;
-							float dz = P5Z - s_jumpZ0;
-							if (dz > s_jumpDzMax)
-								s_jumpDzMax = dz;
-							if (s_jumpFollow == 0)
-								LOG_INFO(LogBots, "[ogfn] jump probe outcome: dzmax={:.1f}uu over 2s", s_jumpDzMax);
-						}
+
 					}
 				}
 
@@ -1156,12 +1221,15 @@ void TickAll()
 					EDrawDebugTrace::None, true, FLinearColor(), FLinearColor(), 0.f, &SkyHit);
 				bool bSkyLos = !SkyHit || !SkyHit->IsBlockingHit();
 
-				LOG_INFO(LogBots, "[ogfn] track z={:.0f} pos=({:.0f},{:.0f}) yaw={:.0f} n={} los={} shootable={} fired={} mov={} mode={} vel=({:.0f},{:.0f},{:.0f}) p5=({:.0f},{:.0f},{:.0f}) skyLOS={}",
+				FVector ZTrk(0.f, 0.f, 0.f);
+				if (g_zoneActor)
+					ZTrk = g_zoneActor->GetActorLocation();
+				LOG_INFO(LogBots, "[ogfn] track z={:.0f} pos=({:.0f},{:.0f}) yaw={:.0f} n={} los={} shootable={} fired={} mov={} mode={} vel=({:.0f},{:.0f},{:.0f}) p5=({:.0f},{:.0f},{:.0f}) zone=({:.0f},{:.0f}) skyLOS={}",
 					W.self_pos.z, W.self_pos.x, W.self_pos.y, Obs.self_yaw_deg,
 					(int)Obs.enemies.size(), (int)W.target_is_visible, (int)M.decision.fire,
 					M.fireCount, M.moveCount, MoveMode, VelAll.X, VelAll.Y, VelAll.Z,
-					bGotP5 ? P5Loc.X : -1.f, bGotP5 ? P5Loc.Y : -1.f, P5Z,
-					(int)bSkyLos);
+					bGotP5 ? P5Loc.X * 0.01f : -1.f, bGotP5 ? P5Loc.Y * 0.01f : -1.f, P5Z * 0.01f,
+					ZTrk.X, ZTrk.Y, (int)bSkyLos);
 			}
 			if (&M == &g_minds[0] && Phase != s_obsPhase)
 			{
@@ -1195,13 +1263,24 @@ void TickAll()
 			? M.motor.aim_at(W.self_pos, W.self_yaw_deg, Target->last_seen_pos, M.decision.fire, dt)
 			: M.motor.idle_look(W.self_yaw_deg, dt);
 
+#ifdef OGFN_SIM_TRACE
+		if (&M == &g_minds[0] && (int)(Now * 10.0) % 6 == 0)
+		{
+			std::printf("[sim] motor t=%.2f out_fire=%d aim_err=%.1f tgt=%d\n",
+				Now, (int)Out.firing, M.motor.aim_error_deg(), Target ? 1 : 0);
+		}
+#endif
+
 		ApplyRotation(Pawn, Out.pitch_deg, Out.yaw_deg);
 
-		// Move on circle-intent decisions only (make_intent fills move_to for
-		// Engage/Flee/RotateToCircle; everything else holds). The old
-		// move_to != (0,0,0) sentinel collided with the LIVE ring resolving to
-		// world origin: with the circle center at (0,0,0) no move was ever sent
-		// (live: pos frozen 75s at edge=789m while the action was RotateToCircle).
+		// KINEMATIC LOCOMOTION on circle-intent decisions (make_intent fills
+		// move_to for Engage/Flee/RotateToCircle). CharacterMovement does not
+		// tick on this build (30/s AddMovementInput for minutes with velocity
+		// frozen at its spawn-inherited value and pos never integrating), while
+		// transform writes DO work (rotation servo, deploy placement). So each
+		// tick steps the pawn: ground-follow probe from just above head height
+		// (climbs slopes and low obstacles, misses tall walls so the sweep stops
+		// us), then a bSweep=true teleport the engine resolves against geometry.
 		if (M.decision.action == ogfn::ActionKind::RotateToCircle
 			|| M.decision.action == ogfn::ActionKind::Engage
 			|| M.decision.action == ogfn::ActionKind::Flee)
@@ -1212,7 +1291,48 @@ void TickAll()
 			float mlen = std::sqrt(mx * mx + my * my);
 			if (mlen > kMoveMinDist)
 			{
-				ApplyMoveInput(Pawn, FVector(mx / mlen, my / mlen, 0.f), 1.f);
+				float dirx = mx / mlen, diry = my / mlen;
+				float step = kBotWalkSpeed * dt; // engine uu per tick
+				FVector Cur = Pawn->GetActorLocation();
+				FVector Want(Cur.X + dirx * step, Cur.Y + diry * step, Cur.Z);
+
+				// Ground-follow from 300uu above current height: floor within a
+				// reachable drop -> rest on it (uphill lifts us onto it,
+				// downhill stops the float after one tick).
+				FHitResult* G = nullptr;
+				UKismetSystemLibrary::LineTraceSingle(Pawn,
+					FVector(Want.X, Want.Y, Want.Z + 300.f),
+					FVector(Want.X, Want.Y, Want.Z - 40000.f),
+					ETraceTypeQuery::TraceTypeQuery1, false, TArray<AActor*>(),
+					EDrawDebugTrace::None, true, FLinearColor(), FLinearColor(), 0.f, &G);
+				if (G && G->IsBlockingHit())
+				{
+					FVector FL = G->GetLocation();
+					if (FL.Z >= Want.Z - 400.f && FL.Z < Want.Z + 300.f)
+						Want.Z = FL.Z + 100.f; // rest on floor, step-up <= head height
+				}
+
+				if (!ApplyTeleportEx(Pawn, Want, /*bSweep*/ true))
+				{
+					// Blocked: slide like a real character before giving up the
+					// tick. Step-up first (fences, curbs, stairs), then side
+					// steps at ~55 degrees around the obstacle (a pawn wall-
+					// hugging head-on would otherwise be stuck forever).
+					bool bMoved = false;
+					FVector Up(Want.X, Want.Y, Want.Z + 45.f);
+					bMoved = ApplyTeleportEx(Pawn, Up, true);
+					if (!bMoved)
+					{
+						for (int s = 0; s < 2 && !bMoved; s++)
+						{
+							float ang = (s == 0 ? 0.96f : -0.96f); // ~55 degrees
+							float sx = dirx * std::cos(ang) - diry * std::sin(ang);
+							float sy = dirx * std::sin(ang) + diry * std::cos(ang);
+							FVector Side(Cur.X + sx * step, Cur.Y + sy * step, Want.Z);
+							bMoved = ApplyTeleportEx(Pawn, Side, true);
+						}
+					}
+				}
 				M.moveCount++;
 			}
 		}

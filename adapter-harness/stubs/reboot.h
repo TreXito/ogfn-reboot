@@ -60,6 +60,7 @@ struct FHitResult
 enum class ETraceTypeQuery { TraceTypeQuery1, TraceTypeQuery2 };
 enum class EDrawDebugTrace { None, ForDuration };
 
+namespace Harness { extern bool g_wallUp; extern float g_wallX; } // sim-defined
 struct UFunction { std::string name; size_t paramsSize = 64; size_t GetPropertiesSize() const { return paramsSize; } };
 struct UClass { std::string name; };
 
@@ -69,6 +70,7 @@ inline int FindOffsetStruct(const std::string&, const std::string& Member, bool 
 {
 	if (Member == "NewLocation") return 0;
 	if (Member == "bSweep") return 12;
+	if (Member == "ReturnValue") return 60; // stub UFunction paramsSize = 64
 	return -1;
 }
 
@@ -178,6 +180,8 @@ inline void UObject::ProcessEvent(UFunction* fn, void* params)
 struct AFortPawn : AActor {};
 struct AFortPlayerPawnAthena : AFortPawn, ProcessEventRecorder
 {
+	static inline std::vector<AFortPlayerPawnAthena*> s_pawns;
+	AFortPlayerPawnAthena() { s_pawns.push_back(this); }
 	float Health = 100.f, Shield = 100.f;
 	float GetHealth() { return Health; }
 	float GetShield() { return Shield; }
@@ -191,8 +195,33 @@ struct AFortPlayerPawnAthena : AFortPawn, ProcessEventRecorder
 		else if (fn->name == "K2_SetActorLocation" && params)
 		{
 			teleportCount++;
-			lastTeleport = ((FVector*)params)[0]; // NewLocation at offset 0
-			Location = lastTeleport;
+			FVector Dest = ((FVector*)params)[0]; // NewLocation at offset 0
+			bool bBlocked = false;
+			// Wall plane (like the sim's LOS wall): a sweep that would cross it
+			// is blocked, so bots must path around it, not through it.
+			if (Harness::g_wallUp && (Location.X - Harness::g_wallX) * (Dest.X - Harness::g_wallX) < 0.f)
+				bBlocked = true;
+			// Pawn-capsule collision, like a real bSweep=true sweep: any other
+			// pawn within ~100uu horizontally and 200uu vertically stops us.
+			for (auto* Other : s_pawns)
+			{
+				if (Other == this || Other->bDestroyed)
+					continue;
+				float dx = Other->Location.X - Dest.X;
+				float dy = Other->Location.Y - Dest.Y;
+				float dz = Other->Location.Z - Dest.Z;
+				if (dx * dx + dy * dy < 10000.f && dz > -200.f && dz < 200.f)
+				{
+					bBlocked = true;
+					break;
+				}
+			}
+			if (!bBlocked)
+			{
+				lastTeleport = Dest;
+				Location = Dest;
+			}
+			((unsigned char*)params)[60] = bBlocked ? 0 : 1; // ReturnValue: moved
 		}
 	}
 };

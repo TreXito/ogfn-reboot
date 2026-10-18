@@ -8,6 +8,8 @@
 namespace Harness
 {
 	extern std::function<bool(const FVector&, const FVector&)> g_losFn;
+	extern bool g_wallUp;   // wall plane also COLLIDES movement
+	extern float g_wallX;   // plane position (P3 sets it between fleet and enemy)
 }
 
 struct UKismetSystemLibrary
