@@ -1033,7 +1033,13 @@ void TickAll()
 		}
 
 		Mind& M = g_minds[i];
-		M.bSeenAlive = true; // combat-phase alive (gate below only reached post-combat)
+		// COMBAT-PHASE only: on the island every bot is alive, and marking them
+		// seen-alive there made the death gate treat all 45 burst victims as
+		// killed bots -- the rescue wave skipped every one of them (live match 1:
+		// deployed=5, respaw wave lines=0). Burst victims are by definition never
+		// seen alive in combat, killed bots are.
+		if (bCombat)
+			M.bSeenAlive = true;
 		if (!M.bSeeded)
 		{
 			uintptr_t key = (uintptr_t)Pawn;
