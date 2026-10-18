@@ -418,19 +418,60 @@ namespace Bots
 			if (CurrentPlayer->IsActorBeingDestroyed())
 				continue;
 
+			auto CurrentPlayerState = Cast<AFortPlayerStateAthena>(CurrentPlayer->GetPlayerState());
+
+			if (!CurrentPlayerState 
+				// || !CurrentPlayerState->IsBot()
+				)
+				continue;
+
+			// Bus-phase logic runs BEFORE the pawn guard, deliberately. Soak evidence:
+			// all 50 bots logged EnterAircraft, yet zero deploys reached this code and
+			// the engine force-dumped everyone at bus end -- during the flight the pawn
+			// is not reliably held, and the pawn-guard `continue` swallowed the whole
+			// body. Neither piece here needs the pawn: the thank/deploy state lives on
+			// the PlayerState (already held), and ServerAttemptAircraftJumpHook takes
+			// the controller.
+			if (PlayerBot.bIsAthenaController && CurrentPlayerState->IsInAircraft())
+			{
+				if (!CurrentPlayerState->HasThankedBusDriver())
+				{
+					static auto ServerThankBusDriverFn = FindObject<UFunction>(L"/Script/FortniteGame.FortPlayerControllerAthena.ServerThankBusDriver");
+					CurrentPlayer->ProcessEvent(ServerThankBusDriverFn);
+				}
+
+				// One staggered jump per bot, 2..31s into the flight: path-spread drops
+				// instead of the old commented-out TODO's ride-to-bus-end.
+				if (!PlayerBot.bBusJumpScheduled)
+				{
+					PlayerBot.bBusJumpScheduled = true;
+					PlayerBot.NextBusJumpTime = UGameplayStatics::GetTimeSeconds(GetWorld()) + (float)(rand() % 30 + 2);
+					LOG_INFO(LogBots, "[ogfn] deploy scheduled");
+				}
+
+				if (UGameplayStatics::GetTimeSeconds(GetWorld()) >= PlayerBot.NextBusJumpTime)
+				{
+					if (auto AsPC = Cast<AFortPlayerController>(CurrentPlayer))
+					{
+						AFortPlayerController::ServerAttemptAircraftJumpHook(AsPC, FRotator());
+						LOG_INFO(LogBots, "[ogfn] bot deploying from bus");
+					}
+				}
+			}
+			else if (GameState->GetGamePhase() == EAthenaGamePhase::Aircraft &&
+			         PlayerBot.bIsAthenaController && !CurrentPlayerState->IsInAircraft() && !PlayerBot.bBusJumpScheduled)
+			{
+				// One-shot: phase says Aircraft but this bot has no in-aircraft state.
+				PlayerBot.bBusJumpScheduled = true;
+				LOG_ERROR(LogBots, "[ogfn] bot NOT in aircraft state during flight -- stranded check");
+			}
+
 			auto CurrentPawn = CurrentPlayer->GetPawn();
 
 			// Respawn-safe: a pawn can be null (phase flip), freed (restarted bot),
 			// or mid-lifecycle (RestartPlayerAtPlayerStart) -- any of which used to
 			// take the tick down (ReadBitfield NULL, then GetActorLocation vcall 0x0).
 			if (!CurrentPawn || !CurrentPawn->IsValidLowLevel() || CurrentPawn->IsActorBeingDestroyed())
-				continue;
-
-			auto CurrentPlayerState = Cast<AFortPlayerStateAthena>(CurrentPlayer->GetPlayerState());
-
-			if (!CurrentPlayerState 
-				// || !CurrentPlayerState->IsBot()
-				)
 				continue;
 
 			if (GameState->GetGamePhase() == EAthenaGamePhase::Warmup)
@@ -444,12 +485,6 @@ namespace Bots
 				} */
 			}	
 
-			if (PlayerBot.bIsAthenaController && CurrentPlayerState->IsInAircraft() && !CurrentPlayerState->HasThankedBusDriver())
-			{
-				static auto ServerThankBusDriverFn = FindObject<UFunction>(L"/Script/FortniteGame.FortPlayerControllerAthena.ServerThankBusDriver");
-				CurrentPlayer->ProcessEvent(ServerThankBusDriverFn);
-			}
-
 			if (CurrentPawn && !Globals::bEnableOgfnBrain)
 			{
 				if (PlayerBot.NextJumpTime <= UGameplayStatics::GetTimeSeconds(GetWorld()))
@@ -459,36 +494,6 @@ namespace Bots
 					CurrentPawn->ProcessEvent(JumpFn);
 					PlayerBot.NextJumpTime = UGameplayStatics::GetTimeSeconds(GetWorld()) + (rand() % 4 + 3);
 				}
-			}
-
-			// Bus deploy: the commented-out TODO (Milxnor) left bots riding the aircraft
-			// forever while the island despawned under them -- they stayed alive in the
-			// count but never appeared in the match. Each bot now schedules ONE random
-			// jump 2..31s into the flight so the squad spreads along the path.
-			if (PlayerBot.bIsAthenaController && CurrentPawn && CurrentPlayerState->IsInAircraft())
-			{
-				if (!PlayerBot.bBusJumpScheduled)
-				{
-					PlayerBot.bBusJumpScheduled = true;
-					PlayerBot.NextBusJumpTime = UGameplayStatics::GetTimeSeconds(GetWorld()) + (float)(rand() % 30 + 2);
-				}
-
-				if (UGameplayStatics::GetTimeSeconds(GetWorld()) >= PlayerBot.NextBusJumpTime)
-				{
-					if (auto AsPC = Cast<AFortPlayerController>(CurrentPlayer))
-					{
-						AFortPlayerController::ServerAttemptAircraftJumpHook(AsPC, FRotator());
-						LOG_INFO(LogBots, "[ogfn] bot deploying from bus");
-					}
-				}
-			}
-			else if (GameState->GetGamePhase() == EAthenaGamePhase::Aircraft && CurrentPawn &&
-			         PlayerBot.bIsAthenaController && !CurrentPlayerState->IsInAircraft() && !PlayerBot.bBusJumpScheduled)
-			{
-				// One-shot diagnostic: aircraft phase active but this bot has no in-aircraft
-				// state -- it would be stranded at the despawned island instead.
-				PlayerBot.bBusJumpScheduled = true;
-				LOG_ERROR(LogBots, "[ogfn] bot NOT in aircraft state during flight -- stranded check");
 			}
 		}
 
