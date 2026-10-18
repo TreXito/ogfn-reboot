@@ -360,10 +360,15 @@ namespace
 
 	// Real line of sight between eye heights. The brain's perception is the only consumer,
 	// so this is the single place wallhack could leak in -- it must stay a trace.
-	bool CanSee(FVector A, FVector B)
+	// CONTEXT MATTERS: the WorldContextObject must be the observing PAWN, not the world.
+	// With GetWorld() as context, bIgnoreSelf has no actor to ignore and the trace starts
+	// inside our own capsule: every LOS check self-hits and returns false (live evidence:
+	// bots in open sky with los=0 forever, so no target ever became shootable). The fork's
+	// own trace call (BGA.h) passes the acting actor for exactly this reason.
+	bool CanSee(AFortPlayerPawnAthena* Self, FVector A, FVector B)
 	{
 		FHitResult* Hit = nullptr;
-		UKismetSystemLibrary::LineTraceSingle(GetWorld(),
+		UKismetSystemLibrary::LineTraceSingle(Self,
 			A + FVector(0, 0, kTraceEyeOffset), B + FVector(0, 0, kTraceEyeOffset),
 			ETraceTypeQuery::TraceTypeQuery1, false, TArray<AActor*>(),
 			EDrawDebugTrace::None, /*bIgnoreSelf*/ true, FLinearColor(), FLinearColor(),
@@ -694,7 +699,7 @@ void TickAll()
 			if (!bTracked && !bNearest2 && !bStaggered)
 				continue;
 
-			bool bLos = CanSee(SelfLoc, C.loc);
+			bool bLos = CanSee(Pawn, SelfLoc, C.loc);
 			traces++;
 
 			ogfn::EnemySample Sample;
@@ -715,6 +720,14 @@ void TickAll()
 		{
 			static EAthenaGamePhase s_obsPhase = (EAthenaGamePhase)-1;
 			static size_t s_obsBotIdx = 0;
+			static double s_nextTrack = 0.0;
+			if (&M == &g_minds[0] && Now >= s_nextTrack)
+			{
+				s_nextTrack = Now + 15.0;
+				LOG_INFO(LogBots, "[ogfn] track z={:.0f} pos=({:.0f},{:.0f}) n={} los={} shootable={}",
+					W.self_pos.z, W.self_pos.x, W.self_pos.y,
+					(int)Obs.enemies.size(), (int)W.target_is_visible, (int)M.decision.fire);
+			}
 			if (&M == &g_minds[0] && Phase != s_obsPhase)
 			{
 				s_obsPhase = Phase;
