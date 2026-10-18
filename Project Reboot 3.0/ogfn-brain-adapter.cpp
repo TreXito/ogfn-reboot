@@ -45,7 +45,7 @@ namespace
 		constexpr double kWaveCadenceSecs = 2.0;
 		constexpr int kWaveMaxAttempts = 30;
 	constexpr double kLootRefreshSecs = 0.5;
-	constexpr float kMoveMinDist = 250.f;      // decision points closer than this are "hold here"
+	constexpr float kMoveMinDist = 2.5f;      // meters: decision points closer than this are "hold here"
 	constexpr float kTraceEyeOffset = 60.f;    // trace between heads, not feet
 
 	struct Mind
@@ -120,7 +120,14 @@ namespace
 		AFortPlayerPawnAthena* pawn = nullptr;
 	};
 
-	inline ogfn::Vec3 ToVec(const FVector& v) { return ogfn::Vec3((float)v.X, (float)v.Y, (float)v.Z); }
+	// UNIT CONTRACT: the brain speaks METERS (perception max_range=90, tests place
+	// enemies at 10..500, target_distance 15..20), the engine speaks centimeters.
+	// ToVec is the one crossing INTO the brain: engine uu -> meters, always.
+	inline ogfn::Vec3 ToVec(const FVector& v)
+	{
+		return ogfn::Vec3((float)v.X * 0.01f, (float)v.Y * 0.01f, (float)v.Z * 0.01f);
+	}
+	inline float ToMeters(float uu) { return uu * 0.01f; }
 	inline FVector ToF(const ogfn::Vec3& v) { return FVector(v.x, v.y, v.z); }
 	inline int PawnId(AFortPlayerPawnAthena* p)
 	{
@@ -465,13 +472,13 @@ namespace
 		if (g_zoneActor)
 		{
 			auto ZoneLoc = g_zoneActor->GetActorLocation();
-			W.circle_center_x = (float)ZoneLoc.X;
-			W.circle_center_y = (float)ZoneLoc.Y;
+			W.circle_center_x = ToMeters((float)ZoneLoc.X);
+			W.circle_center_y = ToMeters((float)ZoneLoc.Y);
 			// Next-ring center unknown until the phase changes: assume it rides with the
 			// current one. Leaving this zero made RotateToCircle aim at the world origin
 			// (caught by the behavior sim: move_to stayed 0,0,0 under a rotation decision).
-			W.circle_next_center_x = (float)ZoneLoc.X;
-			W.circle_next_center_y = (float)ZoneLoc.Y;
+			W.circle_next_center_x = W.circle_center_x;
+			W.circle_next_center_y = W.circle_center_y;
 
 			static int s_indRadiusOff = -2; // resolve once against the actor's own class
 			if (s_indRadiusOff == -2)
@@ -497,7 +504,8 @@ namespace
 		}
 
 		if (Radius <= 0.f)
-			Radius = 4000.f;
+			Radius = 4000.f; // engine fallback, uu
+		Radius = ToMeters(Radius); // <- engine uu -> meters, same crossing as ToVec
 		W.circle_radius = Radius;
 
 		{
@@ -509,8 +517,8 @@ namespace
 		int loot30 = 0;
 		for (auto& LootPos : g_lootPositions)
 		{
-			float dx = (float)LootPos.X - W.self_pos.x;
-			float dy = (float)LootPos.Y - W.self_pos.y;
+			float dx = ToMeters((float)LootPos.X) - W.self_pos.x;
+			float dy = ToMeters((float)LootPos.Y) - W.self_pos.y;
 			if (dx * dx + dy * dy <= 30.f * 30.f)
 				loot30++;
 		}
@@ -913,9 +921,10 @@ void TickAll()
 			FVector Loc = E.pawn->GetActorLocation();
 			FVector D = Loc - SelfLoc;
 			float dxh = (float)D.X, dyh = (float)D.Y;
-			float hlen = std::sqrt(dxh * dxh + dyh * dyh);
-			if (hlen < 1.f || hlen > Cfg.max_range)
-				continue;
+			float hlen = std::sqrt(dxh * dxh + dyh * dyh); // engine uu (traces and sort)
+			if (hlen < 1.f || hlen * 0.01f > Cfg.max_range)
+				continue; // range gate is METERS: raw uu comparison gated at 0.9m and
+			              // silently hid every enemy outside arm's reach (the live n=0).
 			float facing = (dxh / hlen) * FwdX + (dyh / hlen) * FwdY;
 			if (facing < CosHalfFov)
 				continue;
@@ -946,7 +955,7 @@ void TickAll()
 			Sample.health = C.pawn->GetHealth();
 			Sample.line_of_sight = bLos;
 			Obs.enemies.push_back(Sample);
-			if (bLos && C.dist <= 30.f)
+			if (bLos && C.dist <= 3000.f) // 30 m in engine uu
 				enemiesSeenWithin30++;
 		}
 

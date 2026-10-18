@@ -75,14 +75,14 @@ int main()
 		if (!g_wallUp) return true;
 		// Wall plane at x=20 between the fleet (x=0) and the enemy (x=40).
 		float lo = std::min(a.X, b.X), hi = std::max(a.X, b.X);
-		return !(lo < 12.f && hi > 12.f);
+		return !(lo < 1200.f && hi > 1200.f); // wall at 12 m
 	};
 
 	// GameState with resolvable zone fields.
 	world.GS = new AFortGameStateAthena();
 	world.GM = new AFortGameModeAthena();
 	world.GS->offsets["NextRadius"] = 7;
-	world.GS->floatSlots[7] = 5000.f;
+	world.GS->floatSlots[7] = 500000.f;
 	world.GS->offsets["SafeZonePhase"] = 8;
 	world.GS->floatSlots[8] = 2.f;
 
@@ -92,7 +92,7 @@ int main()
 	HumanPC->Inventory = new AFortInventory();
 	auto EnemyPawn = new AFortPlayerPawnAthena();
 	EnemyPawn->name = "HumanEnemyPawn";
-	EnemyPawn->Location = FVector(5000.f, 0.f, 0.f);
+	EnemyPawn->Location = FVector(500000.f, 0.f, 0.f);
 	HumanPC->MyPawn = EnemyPawn;
 	auto HumanConn = new UNetConnection();
 	HumanConn->PC = HumanPC;
@@ -101,7 +101,7 @@ int main()
 	// Zone indicator: 4000 uu east, mid-shrink.
 	auto Zone = new AFortSafeZoneIndicator();
 	Zone->name = "SafeZoneIndicator";
-	Zone->Location = FVector(4000.f, 0.f, 0.f);
+	Zone->Location = FVector(400000.f, 0.f, 0.f); // 4 km ring
 	Zone->StartShrinkTime = (float)Harness::g_now;
 	Zone->FinishShrinkTime = (float)Harness::g_now + 50.0;
 	Harness::g_classObjects[AFortSafeZoneIndicator::StaticClass()].push_back(Zone);
@@ -121,7 +121,7 @@ int main()
 	{
 		auto Pawn = new AFortPlayerPawnAthena();
 		Pawn->name = "FleetPawn" + std::to_string(i);
-		Pawn->Location = FVector(0.f, i * 100.f, 0.f);
+		Pawn->Location = FVector(0.f, i * 10000.f, 0.f); // engine uu
 		Pawn->Rotation = FRotator{ 0.f, 0.f, 0.f };
 		RegisterFn(Pawn, "SetActorRotation", 40);
 		RegisterFn(Pawn, "Jump", 0);
@@ -179,7 +179,7 @@ int main()
 
 	// ---------- P2: enemy in front, LOS clear ----------
 	std::printf("\n-- P2: enemy 25m dead ahead, clear LOS (6s) --\n");
-	EnemyPawn->Location = FVector(25.f, 0.f, 0.f);
+	EnemyPawn->Location = FVector(2500.f, 0.f, 0.f); // 25 m
 	double p2Start = Harness::g_now;
 	TickFor(6.0);
 
@@ -208,7 +208,7 @@ int main()
 	std::printf("\n-- P4: enemy gone, ring shrinks to 3700 (fleet outside, 6s) --\n");
 	world.ND->Connections.v.clear();
 	g_wallUp = false;
-	world.GS->floatSlots[7] = 3700.f;
+	world.GS->floatSlots[7] = 370000.f;
 	int moveBefore = P0->moveCount;
 	TickFor(6.0);
 	int moveDelta = P0->moveCount - moveBefore;
@@ -290,6 +290,17 @@ int main()
 		EXPECT(!anySame, "wave pawns land at distinct coordinates (no re-collision)");
 		EXPECT(reequipped == victims, "every wave pawn re-bound its controller's rifle");
 	}
+
+	// ---------- P7: unit contract (the live n=0 killer) ----------
+	// Perception must see the deployed ring: 500..1420uu cluster = 5..14 m, well
+	// inside max_range=90m. If uu ever leak through the boundary again (range gate
+	// reading 0.9 m), nobody perceives anybody and this fails.
+	std::printf("\n-- P7: unit contract, fight inside the deployed ring (5s) --\n");
+	int fireBeforeP7 = FleetFireTotal();
+	int p0BeforeP7 = P0->fireCount;
+	TickFor(5.0);
+	EXPECT(FleetFireTotal() > fireBeforeP7, "bots in range perceive and fight each other (meters boundary holds)");
+	EXPECT(P0->fireCount > p0BeforeP7, "bot0 pulls the trigger on an in-range neighbor");
 
 	// ---------- summary ----------
 	std::printf("\n=== summary ===\n");

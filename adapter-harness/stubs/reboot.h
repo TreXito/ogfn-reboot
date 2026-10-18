@@ -184,7 +184,7 @@ struct AFortPlayerPawnAthena : AFortPawn, ProcessEventRecorder
 	void ProcessEvent(UFunction* fn, void* params) override
 	{
 		if (!fn) return;
-		if (fn->name == "SetActorRotation" && params) { rotationCount++; lastRotation = ((FRotator*)params)[0]; }
+		if (fn->name == "SetActorRotation" && params) { rotationCount++; lastRotation = ((FRotator*)params)[0]; Rotation = lastRotation; }
 		else if (fn->name == "AddMovementInput" && params) { moveCount++; lastMoveDir = ((FVector*)params)[0]; }
 		else if (fn->name == "Jump") jumpCount++;
 		else if (fn->name == "StartFire") { fireCount++; fireTimes.push_back(HarnessNow()); }
