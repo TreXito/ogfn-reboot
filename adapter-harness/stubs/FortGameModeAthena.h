@@ -1,3 +1,9 @@
 #pragma once
-// STUB: the adapter includes the fork's FortGameModeAthena.h but references nothing
-// from it directly (all game-state access goes through the GameState stub).
+// STUB: adapter only needs StartAircraftPhase (force-bus trigger) from the game mode.
+#include "reboot.h"
+
+struct AFortGameModeAthena : UObject
+{
+	static inline int s_aircraftCalls = 0;
+	void StartAircraftPhase() { s_aircraftCalls++; }
+};

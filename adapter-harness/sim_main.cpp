@@ -12,6 +12,7 @@
 #include "stubs/globals.h"
 #include "stubs/bots.h"
 #include "stubs/FortGameStateAthena.h"
+#include "stubs/FortGameModeAthena.h"
 #include "stubs/FortSafeZoneIndicator.h"
 #include "stubs/FortWorldItemDefinition.h"
 #include "stubs/KismetSystemLibrary.h"
@@ -43,8 +44,10 @@ struct SimWorld : UWorld
 {
 	AFortGameStateAthena* GS = nullptr;
 	UNetDriver* ND = nullptr;
+	AFortGameModeAthena* GM = nullptr;
 	UObject* GetGameState() override { return GS; }
 	UNetDriver* GetNetDriver() override { return ND; }
+	UObject* GetGameMode() override { return GM; }
 };
 
 static UClass* NamedClass(const wchar_t* n, const char* shortName)
@@ -77,6 +80,7 @@ int main()
 
 	// GameState with resolvable zone fields.
 	world.GS = new AFortGameStateAthena();
+	world.GM = new AFortGameModeAthena();
 	world.GS->offsets["NextRadius"] = 7;
 	world.GS->floatSlots[7] = 5000.f;
 	world.GS->offsets["SafeZonePhase"] = 8;

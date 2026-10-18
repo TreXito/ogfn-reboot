@@ -235,6 +235,7 @@ struct UWorld : UObject
 	using UObject::UObject;
 	virtual UObject* GetGameState() { return nullptr; }
 	virtual UNetDriver* GetNetDriver() { return nullptr; }
+	virtual UObject* GetGameMode() { return nullptr; }
 };
 
 namespace Harness

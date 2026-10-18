@@ -503,6 +503,29 @@ void TickAll()
 
 	double Now = UGameplayStatics::GetTimeSeconds(World);
 
+	// External match control: drop a C:\ogfn\FORCE_BUS.txt file and the server
+	// calls StartAircraftPhase on its next tick (the same verb the upstream
+	// 'startaircraft' console command uses -- which is unreachable in this build,
+	// hence the file). Used by automated soaks, and by you as a force-bus button.
+	{
+		static bool s_forced = false;
+		if (!s_forced)
+		{
+			FILE* f = std::fopen("C:\\ogfn\\FORCE_BUS.txt", "r");
+			if (f)
+			{
+				std::fclose(f);
+				std::remove("C:\\ogfn\\FORCE_BUS.txt");
+				if (auto GM = Cast<AFortGameModeAthena>(World->GetGameMode()))
+				{
+					GM->StartAircraftPhase();
+					s_forced = true;
+					LOG_INFO(LogBots, "[ogfn] FORCE_BUS consumed: StartAircraftPhase issued");
+				}
+			}
+		}
+	}
+
 	// Island-lobby gate: while warmup, bots stand like real players do -- no observe,
 	// think, servo-aim, or traces. This is also what kills the pre-bus spin/rotation
 	// audio storm and most of the lobby CPU. Arming and auto-skin still run (they

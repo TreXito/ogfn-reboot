@@ -34,10 +34,18 @@ static void ApplyHID(AFortPlayerPawn* Pawn, UObject* HeroDefinition, bool bUseSe
 
 			if (bUseServerChoosePart)
 			{
+				int AppliedParts = 0;
 				for (int z = 0; z < CharacterParts.Num(); z++)
 				{
-					Pawn->ServerChoosePart((EFortCustomPartType)z, CharacterParts.at(z).Get(CustomCharacterPartClass, true));
+					auto Part = CharacterParts.at(z).Get(CustomCharacterPartClass, true);
+					if (Part)
+					{
+						Pawn->ServerChoosePart((EFortCustomPartType)z, Part);
+						AppliedParts++;
+					}
 				}
+				// ogfn: evidence line -- how many parts actually made it onto the pawn.
+				LOG_INFO(LogBots, "[ogfn] ServerChoosePart applied {} parts (of {})", AppliedParts, CharacterParts.Num());
 
 				continue; // hm?
 			}
