@@ -68,6 +68,7 @@ struct UObject
 
 	virtual ~UObject() = default;
 	virtual std::string GetPathName() const { return name; }
+	bool IsValidLowLevel() { return true; } // sim objects are always allocated
 
 	// The fork has both 1-arg and 2-arg forms; the default covers both call styles.
 	int GetOffset(const std::string& n, bool bWarn = true) const
@@ -191,6 +192,9 @@ struct AFortPlayerController : UObject
 	// which matters: the adapter calls it through a base pointer.
 	AFortPawn* MyPawn = nullptr;
 	AFortPawn*& GetMyFortPawn() { return MyPawn; }
+	// AController::GetPawn in the real engine: the adapter reads the pawn FRESH
+	// from the controller every tick (respawn replaces the cached pointer).
+	AFortPawn* GetPawn() { return MyPawn; }
 };
 struct AFortPlayerControllerAthena : AFortPlayerController
 {

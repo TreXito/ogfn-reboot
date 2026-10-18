@@ -4,6 +4,11 @@
 // resolved-zone branch of BuildSnapshot.
 #include "reboot.h"
 
+// Mirrors the real enum name/values the adapter compares against.
+enum class EAthenaGamePhase : uint8_t { Warmup, Setup, Aircraft, EndGame };
+
 struct AFortGameStateAthena : UObject
 {
+	EAthenaGamePhase Phase = EAthenaGamePhase::Setup;
+	EAthenaGamePhase GetGamePhase() { return Phase; } // real returns a reference; value is fine for == compare
 };

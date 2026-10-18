@@ -95,23 +95,18 @@ namespace OgfnLocker
 		LOG_INFO(LogBots, "[ogfn] locker populated: {} characters, {} emotes.", Characters.size(), Emotes.size());
 	}
 
-	static void ApplyCharacter(int Index)
+	static bool ApplyCharacter(int Index)
 	{
 		auto PlayerController = GetLocalController();
 
+		// Menu-state bails are silent and retried every tick; only outcomes matter.
 		if (!PlayerController)
-		{
-			LOG_ERROR(LogBots, "[ogfn] locker: no local player controller yet.");
-			return;
-		}
+			return false;
 
 		auto Pawn = Cast<AFortPlayerPawn>(PlayerController->GetMyFortPawn());
 
 		if (!Pawn)
-		{
-			LOG_ERROR(LogBots, "[ogfn] locker: no pawn yet -- join the lobby first.");
-			return;
-		}
+			return false;
 
 		auto CID = Characters.at(Index);
 
@@ -121,11 +116,11 @@ namespace OgfnLocker
 		if (ApplyCID(Pawn, CID, true))
 		{
 			LOG_INFO(LogBots, "[ogfn] locker: applied {}.", CID->GetPathName());
+			return true;
 		}
-		else
-		{
-			LOG_ERROR(LogBots, "[ogfn] locker: ApplyCID failed for {}.", CID->GetPathName());
-		}
+
+		LOG_ERROR(LogBots, "[ogfn] locker: ApplyCID failed for {}.", CID->GetPathName());
+		return false;
 	}
 
 	// Called repeatedly from the ReadyToStartMatch hook: once a connected player has a
@@ -162,11 +157,19 @@ namespace OgfnLocker
 			}
 		}
 
+		// First attempt only in the log (menu state retries every tick); the flag
+		// flips ONLY on real success -- previously a menu-state bail latched it and
+		// the skin never applied once a pawn actually existed.
+		static bool s_loggedAttempt = false;
 		int idx = rand() % (int)Characters.size();
-		LOG_INFO(LogBots, "[ogfn] auto-applying skin {} ({}/{})", Characters.at(idx)->GetPathName(),
-		         idx + 1, (int)Characters.size());
-		ApplyCharacter(idx);
-		bAutoApplied = true;
+		if (!s_loggedAttempt)
+		{
+			s_loggedAttempt = true;
+			LOG_INFO(LogBots, "[ogfn] auto-applying skin {} ({}/{})", Characters.at(idx)->GetPathName(),
+			         idx + 1, (int)Characters.size());
+		}
+		if (ApplyCharacter(idx))
+			bAutoApplied = true;
 	}
 
 	static void PlayEmote(int Index)

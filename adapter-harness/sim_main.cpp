@@ -149,8 +149,18 @@ int main()
 		return t;
 	};
 
+	// ---------- P0: island warmup gate ----------
+	// Real players stand around on spawn island; bots must too (no servo spin, no
+	// trace storm, but arming still runs because island IS warmup).
+	std::printf("\n-- P0: warmup gate (1s, standing + arming) --\n");
+	world.GS->Phase = EAthenaGamePhase::Warmup;
+	int rotBeforeWarmup = P0->rotationCount;
+	TickFor(1.0);
+	EXPECT(P0->rotationCount == rotBeforeWarmup, "warmup: bots stand still (no rotation act)");
+	world.GS->Phase = EAthenaGamePhase::Setup;
+
 	// ---------- P1: lobby, no enemies ----------
-	std::printf("\n-- P1: lobby idle (2s, no enemies) --\n");
+	std::printf("\n-- P1: no enemies, act enabled (2s) --\n");
 	TickFor(2.0);
 
 	int armAdds = 0;

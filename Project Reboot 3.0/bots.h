@@ -352,6 +352,10 @@ namespace Bots
 	{
 		auto playerBot = PlayerBot();
 		playerBot.Initialize(SpawnTransform, InSpawnLocator);
+		// Upstream never wrote this field anywhere (grep-verified): it stayed false,
+		// which silently killed the thank-bus branch AND every condition on it --
+		// including the bus deploy, i.e. "nobody jumped from the bus".
+		playerBot.bIsAthenaController = true;
 		AllPlayerBotsToTick.push_back(playerBot);
 		return playerBot.Controller;
 	}
@@ -416,9 +420,10 @@ namespace Bots
 
 			auto CurrentPawn = CurrentPlayer->GetPawn();
 
-			// Pawn goes momentarily null at phase transitions (Aircraft flip) --
-			// the unchecked deref crashed ReadBitfieldValue(NULL, 0x84) live.
-			if (!CurrentPawn || CurrentPawn->IsActorBeingDestroyed())
+			// Respawn-safe: a pawn can be null (phase flip), freed (restarted bot),
+			// or mid-lifecycle (RestartPlayerAtPlayerStart) -- any of which used to
+			// take the tick down (ReadBitfield NULL, then GetActorLocation vcall 0x0).
+			if (!CurrentPawn || !CurrentPawn->IsValidLowLevel() || CurrentPawn->IsActorBeingDestroyed())
 				continue;
 
 			auto CurrentPlayerState = Cast<AFortPlayerStateAthena>(CurrentPlayer->GetPlayerState());

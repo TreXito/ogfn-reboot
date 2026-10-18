@@ -33,6 +33,7 @@ namespace OgfnLocker { void AutoApplyOnce(); }  // provided by the harness stub
 #endif
 #include "ogfn/ogfn_bots.h"
 #include <cmath>
+#include <algorithm>
 #include <cstdio>
 
 namespace OgfnBot
@@ -117,6 +118,14 @@ namespace
 	{
 		uintptr_t k = (uintptr_t)p;
 		return (int)(k ^ (k >> 32)) & 0x7fffffff;
+	}
+
+	// Respawn-window safety: freed, mid-destroy, or not-yet-live pawns must not be
+	// touched (the live crashes: ReadBitfield on NULL, then GetActorLocation via a
+	// clobbered vtable -> call to 0x0 during RestartPlayerAtPlayerStart).
+	inline bool PawnUsable(AFortPlayerPawnAthena* p)
+	{
+		return p && (uintptr_t)p > 0x10000 && p->IsValidLowLevel() && !p->IsActorBeingDestroyed();
 	}
 
 	void ResolveVerbs(AFortPlayerPawnAthena* Pawn)
@@ -235,7 +244,8 @@ namespace
 			return;
 
 		TArray<AActor*> Found = UGameplayStatics::GetAllActorsOfClass(World, AFortSafeZoneIndicator::StaticClass());
-		g_zoneActor = Found.Num() > 0 ? Cast<AFortSafeZoneIndicator>(Found.at(0)) : nullptr;
+		auto Zone = Found.Num() > 0 ? Cast<AFortSafeZoneIndicator>(Found.at(0)) : nullptr;
+		g_zoneActor = (Zone && Zone->IsValidLowLevel() && !Zone->IsActorBeingDestroyed()) ? Zone : nullptr;
 	}
 
 	void RefreshLoot(double Now)
@@ -492,41 +502,63 @@ void TickAll()
 	g_minds.resize(bots.size());
 
 	double Now = UGameplayStatics::GetTimeSeconds(World);
-	RefreshZone(Now);
-	RefreshLoot(Now);
 
-	// Enemy pawn set for this pass: every other fleet bot plus every human client pawn.
+	// Island-lobby gate: while warmup, bots stand like real players do -- no observe,
+	// think, servo-aim, or traces. This is also what kills the pre-bus spin/rotation
+	// audio storm and most of the lobby CPU. Arming and auto-skin still run (they
+	// must: island IS warmup, and that is exactly when your pawn exists).
+	bool bWarmup = false;
+	if (auto GS = Cast<AFortGameStateAthena>(World->GetGameState()))
+		bWarmup = (GS->GetGamePhase() == EAthenaGamePhase::Warmup);
+
+	if (!bWarmup)
+	{
+		RefreshZone(Now);
+		RefreshLoot(Now);
+	}
+
+	// Enemy pawn set for this pass: every other fleet bot plus every human client
+	// pawn, read FRESH from the controller each tick (respawns replace the cached
+	// PlayerBot.Pawn pointer, which never gets refreshed upstream).
 	static std::vector<EnemyPawn> Enemies;
 	Enemies.clear();
 	Enemies.reserve(bots.size() + 4);
-	for (auto& Bot : bots)
+	if (!bWarmup)
 	{
-		if (Bot.Pawn && !Bot.Pawn->IsActorBeingDestroyed())
-			Enemies.push_back({ PawnId(Bot.Pawn), Bot.Pawn });
-	}
-	auto NetDriver = World->GetNetDriver();
-	if (NetDriver)
-	{
-		auto& Connections = NetDriver->GetClientConnections();
-		for (int i = 0; i < Connections.Num(); i++)
+		for (auto& Bot : bots)
 		{
-			auto PC = Cast<AFortPlayerController>(Connections.At(i)->GetPlayerController());
-			if (!PC)
+			if (!Bot.Controller || !Bot.Controller->IsValidLowLevel())
 				continue;
-			auto HumanPawn = Cast<AFortPlayerPawnAthena>(PC->GetMyFortPawn());
-			if (HumanPawn && !HumanPawn->IsActorBeingDestroyed())
-				Enemies.push_back({ PawnId(HumanPawn), HumanPawn });
+			auto P = Cast<AFortPlayerPawnAthena>(Bot.Controller->GetPawn());
+			if (PawnUsable(P))
+				Enemies.push_back({ PawnId(P), P });
+		}
+		auto NetDriver = World->GetNetDriver();
+		if (NetDriver)
+		{
+			auto& Connections = NetDriver->GetClientConnections();
+			for (int i = 0; i < Connections.Num(); i++)
+			{
+				auto PC = Cast<AFortPlayerController>(Connections.At(i)->GetPlayerController());
+				if (!PC || !PC->IsValidLowLevel())
+					continue;
+				auto HumanPawn = Cast<AFortPlayerPawnAthena>(PC->GetMyFortPawn());
+				if (PawnUsable(HumanPawn))
+					Enemies.push_back({ PawnId(HumanPawn), HumanPawn });
+			}
 		}
 	}
 
 	for (size_t i = 0; i < bots.size(); i++)
 	{
 		auto& Bot = bots[i];
-		auto Pawn = Bot.Pawn;
-		if (!Pawn || Pawn->IsActorBeingDestroyed())
+		if (!Bot.Controller || !Bot.Controller->IsValidLowLevel())
 			continue;
 		auto Controller = Cast<AFortPlayerControllerAthena>(Bot.Controller);
 		if (!Controller)
+			continue;
+		auto Pawn = Cast<AFortPlayerPawnAthena>(Controller->GetPawn()); // fresh: respawns replace the cached pointer
+		if (!PawnUsable(Pawn))
 			continue;
 
 		Mind& M = g_minds[i];
@@ -555,6 +587,12 @@ void TickAll()
 				M.nextArmTry = Now + 2.0;
 		}
 
+		if (bWarmup)
+		{
+			M.lastTick = Now; // keep dt sane for the first in-match tick
+			continue;         // island: stand still, no perception load, no servo noise
+		}
+
 		float dt = (float)(Now - M.lastTick);
 		M.lastTick = Now;
 		if (dt < 1.f / 240.f)
@@ -562,7 +600,11 @@ void TickAll()
 		if (dt > 0.1f)
 			dt = 0.1f;
 
-		// Observation: range + FOV prefilter, then one real trace per survivor.
+		// Observation: range + FOV prefilter first (no traces), sort by range, then
+		// a HARD trace budget. At 50 bots an unbounded 50x50 LOS matrix at 30 Hz is
+		// what ate the gaming rig (user measured 50 -> 200 fps when the server died).
+		// Policy: nearest 2 always, anything the mind already tracks, and at most
+		// 6 total traces/bot/tick with stale candidates re-probed on a 3-tick rotation.
 		ogfn::Observation Obs;
 		Obs.self_pos = ToVec(Pawn->GetActorLocation());
 		Obs.self_yaw_deg = Pawn->GetActorRotation().Yaw;
@@ -574,9 +616,12 @@ void TickAll()
 		FVector SelfLoc = Pawn->GetActorLocation();
 		int enemiesSeenWithin30 = 0;
 
+		struct Cand { float dist = 0.f; FVector loc; int id = 0; AFortPlayerPawnAthena* pawn = nullptr; };
+		std::vector<Cand> Cands;
+		Cands.reserve(Enemies.size());
 		for (auto& E : Enemies)
 		{
-			if (E.pawn == Pawn)
+			if (E.pawn == Pawn || !PawnUsable(E.pawn))
 				continue;
 			FVector Loc = E.pawn->GetActorLocation();
 			FVector D = Loc - SelfLoc;
@@ -587,15 +632,34 @@ void TickAll()
 			float facing = (dxh / hlen) * FwdX + (dyh / hlen) * FwdY;
 			if (facing < CosHalfFov)
 				continue;
+			Cands.push_back({ hlen, Loc, E.id, E.pawn });
+		}
+		std::sort(Cands.begin(), Cands.end(),
+			[](const Cand& x, const Cand& y) { return x.dist < y.dist; });
 
-			bool bLos = CanSee(SelfLoc, Loc);
+		static int s_probeTick = 0;
+		s_probeTick++;
+		int traces = 0;
+		constexpr int kMaxTraces = 6;
+		for (size_t ci = 0; ci < Cands.size() && traces < kMaxTraces; ci++)
+		{
+			auto& C = Cands[ci];
+			bool bTracked = M.brain.perception().by_id(C.id) != nullptr;
+			bool bNearest2 = ci < 2;
+			bool bStaggered = ((s_probeTick + (int)ci) % 3) == 0;
+			if (!bTracked && !bNearest2 && !bStaggered)
+				continue;
+
+			bool bLos = CanSee(SelfLoc, C.loc);
+			traces++;
+
 			ogfn::EnemySample Sample;
-			Sample.id = E.id;
-			Sample.pos = ToVec(Loc);
-			Sample.health = E.pawn->GetHealth();
+			Sample.id = C.id;
+			Sample.pos = ToVec(C.loc);
+			Sample.health = C.pawn->GetHealth();
 			Sample.line_of_sight = bLos;
 			Obs.enemies.push_back(Sample);
-			if (bLos && hlen <= 30.f)
+			if (bLos && C.dist <= 30.f)
 				enemiesSeenWithin30++;
 		}
 
