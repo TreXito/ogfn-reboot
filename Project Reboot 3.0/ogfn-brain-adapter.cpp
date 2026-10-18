@@ -355,10 +355,12 @@ namespace
 		if (g_ladderParsed || g_ladderTries >= 40)
 			return;
 		g_ladderTries++;
-		const char* La = getenv("LOCALAPPDATA");
-		if (!La)
+		char* La = nullptr;
+		size_t LaLen = 0;
+		if (_dupenv_s(&La, &LaLen, "LOCALAPPDATA") != 0 || !La || LaLen == 0)
 			return;
 		std::string Path = std::string(La) + "\\FortniteGame\\Saved\\Logs\\FortniteGame.log";
+		free(La);
 		FILE* F = nullptr;
 		if (fopen_s(&F, Path.c_str(), "r") != 0 || !F)
 			return;
