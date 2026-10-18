@@ -59,6 +59,7 @@ namespace
 		bool bAutoLanded = false;   // bus-dump place-once flag (see the auto-land block)
 		bool bNeedsReequip = false; // wave respawn: rebind the controller's rifle to the new pawn
 		int fireCount = 0;          // motor triggers pulled (evidence of sustained combat)
+		int moveCount = 0;          // move intents that reached ApplyMoveInput
 		FGuid armGuid;              // guid of the granted rifle (equip-only path, no re-add)
 		double nextArmTry = 0.0;
 		double nextLandTry = 0.0;   // retry clock for a rejected ground probe
@@ -1076,10 +1077,10 @@ void TickAll()
 					EDrawDebugTrace::None, true, FLinearColor(), FLinearColor(), 0.f, &SkyHit);
 				bool bSkyLos = !SkyHit || !SkyHit->IsBlockingHit();
 
-				LOG_INFO(LogBots, "[ogfn] track z={:.0f} pos=({:.0f},{:.0f}) n={} los={} shootable={} fired={} attached={} velZ={:.0f} skyLOS={} bus=({},{},{})",
+				LOG_INFO(LogBots, "[ogfn] track z={:.0f} pos=({:.0f},{:.0f}) n={} los={} shootable={} fired={} mov={} attached={} velZ={:.0f} skyLOS={} bus=({},{},{})",
 					W.self_pos.z, W.self_pos.x, W.self_pos.y,
 					(int)Obs.enemies.size(), (int)W.target_is_visible, (int)M.decision.fire,
-					M.fireCount, (int)bAttached, velZ, (int)bSkyLos,
+					M.fireCount, M.moveCount, (int)bAttached, velZ, (int)bSkyLos,
 					bGotBus ? BusLoc.X : -1.f, bGotBus ? BusLoc.Y : -1.f, bGotBus ? BusLoc.Z : -1.f);
 			}
 			if (&M == &g_minds[0] && Phase != s_obsPhase)
@@ -1116,15 +1117,24 @@ void TickAll()
 
 		ApplyRotation(Pawn, Out.pitch_deg, Out.yaw_deg);
 
-		// Move toward the decision's target point when it is a real, far-away point.
-		const ogfn::Vec3& To = M.decision.move_to;
-		if (To.x != 0.f || To.y != 0.f || To.z != 0.f)
+		// Move on circle-intent decisions only (make_intent fills move_to for
+		// Engage/Flee/RotateToCircle; everything else holds). The old
+		// move_to != (0,0,0) sentinel collided with the LIVE ring resolving to
+		// world origin: with the circle center at (0,0,0) no move was ever sent
+		// (live: pos frozen 75s at edge=789m while the action was RotateToCircle).
+		if (M.decision.action == ogfn::ActionKind::RotateToCircle
+			|| M.decision.action == ogfn::ActionKind::Engage
+			|| M.decision.action == ogfn::ActionKind::Flee)
 		{
+			const ogfn::Vec3& To = M.decision.move_to;
 			float mx = To.x - W.self_pos.x;
 			float my = To.y - W.self_pos.y;
 			float mlen = std::sqrt(mx * mx + my * my);
 			if (mlen > kMoveMinDist)
+			{
 				ApplyMoveInput(Pawn, FVector(mx / mlen, my / mlen, 0.f), 1.f);
+				M.moveCount++;
+			}
 		}
 
 		if (Out.jumping)
