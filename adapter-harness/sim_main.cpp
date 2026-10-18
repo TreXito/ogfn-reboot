@@ -32,7 +32,7 @@ namespace Harness
 // Harness stub for the real call-site in TickAll (locker lives in the fork).
 namespace OgfnLocker { void AutoApplyOnce() {} }
 
-namespace OgfnBot { void TestClearBurstState(size_t i); } // adapter (OGFN_HARNESS)
+namespace OgfnBot { void TestClearBurstState(size_t i); void TestSetLadder(float, float, float); } // adapter (OGFN_HARNESS)
 
 static int g_failures = 0;
 #define EXPECT(cond, msg) do { \
@@ -312,6 +312,20 @@ int main()
 	TickFor(5.0);
 	EXPECT(FleetFireTotal() > fireBeforeP7, "bots in range perceive and fight each other (meters boundary holds)");
 	EXPECT(P0->fireCount > p0BeforeP7, "bot0 pulls the trigger on an in-range neighbor");
+
+	// ---------- P8: storm-evac (ladder + hp gate) ----------
+	// User directive: bots must not die to the storm. The hard guarantee: hurt
+	// outside the FINAL ring -> extract to its center (which lies inside every
+	// ring by construction). Inject the ladder, drop hp, expect one teleport.
+	std::printf("\n-- P8: storm-evac (ladder + hp gate) --\n");
+	OgfnBot::TestSetLadder(90000.f, 45000.f, 625.f);
+	P0->Health = 50.f;
+	int telBeforeP8 = P0->teleportCount;
+	TickFor(1.0);
+	EXPECT(P0->teleportCount > telBeforeP8, "storm-evac teleports a hurt bot that is outside the final ring");
+	EXPECT(P0->Location.X > 88000.f && P0->Location.X < 92000.f, "evac lands near final ring center X");
+	EXPECT(P0->Location.Y > 43000.f && P0->Location.Y < 47000.f, "evac lands near final ring center Y");
+	EXPECT(P0->Location.Z >= 0.f && P0->Location.Z < 300.f, "evac pawn ends on the ground");
 
 	// ---------- summary ----------
 	std::printf("\n=== summary ===\n");

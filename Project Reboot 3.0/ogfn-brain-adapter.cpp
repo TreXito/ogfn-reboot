@@ -36,6 +36,7 @@ namespace OgfnLocker { void AutoApplyOnce(); }  // provided by the harness stub
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 
 namespace OgfnBot
 {
@@ -43,6 +44,10 @@ namespace OgfnBot
 // Behavior-sim hook: P6 recreates the post-burst state (pawnless controllers that
 // were alive pre-deploy), which only occurs before a bot is ever seen in combat.
 void TestClearBurstState(size_t i);
+#endif
+#ifdef OGFN_HARNESS
+// Behavior-sim hook: inject the storm ladder (live builds parse it from the engine log).
+void TestSetLadder(float cx, float cy, float r);
 #endif
 
 namespace
@@ -71,6 +76,8 @@ namespace
 		                            // burst victims never have (wave rescues them);
 		                            // killed bots do (wave must NOT resurrect them)
 		bool bElimLogged = false;   // one ELIMINATED line per bot
+		bool bStormEvac = false;    // emergency storm extract done
+		int stepOk = 0, stepBlk = 0; // kinematic walk: displaced vs blocked ticks
 		int moveCount = 0;          // move intents that reached ApplyMoveInput
 		FGuid armGuid;              // guid of the granted rifle (equip-only path, no re-add)
 		double nextArmTry = 0.0;
@@ -89,6 +96,10 @@ namespace
 	};
 
 	std::vector<Mind> g_minds;                 // index-parallel to AllPlayerBotsToTick
+	bool g_zoneTruth = false;      // is the snapshot ring real (ladder or engine field)?
+	bool g_ladderParsed = false;   // engine's 9-ring storm ladder read from its log
+	float g_ladderCX = 0.f, g_ladderCY = 0.f, g_ladderR = 0.f; // uu, innermost ring >0
+	int g_ladderTries = 0;
 	bool g_summaryLogged = false;
 	UFunction* g_moveCompSetModeFn = nullptr;   // resolved once at combat gate
 
@@ -332,6 +343,84 @@ namespace
 		ApplyTeleportEx(Pawn, NewLocation, false);
 	}
 
+	// The engine prints its FULL storm ladder at match start (nine
+	// PickSafeZoneLocation rings, each with Radius + Setting Location). The
+	// innermost ring's center lies inside EVERY ring (verified against two
+	// matches' numbers), so standing there is safe for the whole match -- that
+	// is the destination that keeps bots out of the storm. Called every zone
+	// refresh until the picks land in the log (~60s after SafeZones).
+#ifndef OGFN_HARNESS
+	void TryParseRingLadder()
+	{
+		if (g_ladderParsed || g_ladderTries >= 40)
+			return;
+		g_ladderTries++;
+		const char* La = getenv("LOCALAPPDATA");
+		if (!La)
+			return;
+		std::string Path = std::string(La) + "\\FortniteGame\\Saved\\Logs\\FortniteGame.log";
+		FILE* F = nullptr;
+		if (fopen_s(&F, Path.c_str(), "r") != 0 || !F)
+			return;
+		float Rad[10] = {}, Cx[10] = {}, Cy[10] = {};
+		bool bHasR[10] = {}, bHasL[10] = {};
+		char Line[768];
+		while (fgets(Line, (int)sizeof(Line), F))
+		{
+			int N = 0;
+			char* Ch = strstr(Line, "Changing Pick Radius from");
+			if (Ch)
+			{
+				float A = 0.f, B = 0.f;
+				if (sscanf_s(Line, "PickSafeZoneLocation[%d]", &N) == 1 && N >= 1 && N <= 9
+					&& sscanf_s(Ch, "Changing Pick Radius from %f to %f", &A, &B) == 2)
+				{
+					Rad[N] = B;
+					bHasR[N] = true;
+				}
+			}
+			char* Loc = strstr(Line, "Setting Location:");
+			if (Loc)
+			{
+				float X = 0.f, Y = 0.f, Z = 0.f;
+				if (sscanf_s(Line, "PickSafeZoneLocation[%d]", &N) == 1 && N >= 1 && N <= 9
+					&& sscanf_s(Loc, "Setting Location: %f, %f, %f", &X, &Y, &Z) == 3)
+				{
+					Cx[N] = X;
+					Cy[N] = Y;
+					bHasL[N] = true;
+				}
+			}
+		}
+		fclose(F);
+
+		// Innermost ring with a real radius (>0): the final safe point.
+		float BestR = 0.f;
+		int BestN = 0;
+		for (int N = 1; N <= 9; N++)
+		{
+			if (bHasR[N] && bHasL[N] && Rad[N] > 0.f && (BestN == 0 || Rad[N] < BestR))
+			{
+				BestR = Rad[N];
+				BestN = N;
+			}
+		}
+		if (BestN)
+		{
+			g_ladderCX = Cx[BestN];
+			g_ladderCY = Cy[BestN];
+			g_ladderR = BestR;
+			g_ladderParsed = true;
+			LOG_INFO(LogBots, "[ogfn] ring ladder parsed: finalC=({:.0f},{:.0f}) finalR={:.0f}uu (ring{})",
+				g_ladderCX, g_ladderCY, g_ladderR, BestN);
+		}
+		else if (g_ladderTries == 40)
+		{
+			LOG_ERROR(LogBots, "[ogfn] ring ladder NEVER parsed after {} attempts: no zone truth, bots hold position (storm risk)", g_ladderTries);
+		}
+	}
+#endif
+
 	void RefreshZone(double Now)
 	{
 		if (Now < g_zoneNextFind)
@@ -342,6 +431,9 @@ namespace
 		if (!World)
 			return;
 
+#ifndef OGFN_HARNESS
+		TryParseRingLadder();
+#endif
 		TArray<AActor*> Found = UGameplayStatics::GetAllActorsOfClass(World, AFortSafeZoneIndicator::StaticClass());
 		auto Zone = Found.Num() > 0 ? Cast<AFortSafeZoneIndicator>(Found.at(0)) : nullptr;
 		g_zoneActor = (Zone && Zone->IsValidLowLevel() && !Zone->IsActorBeingDestroyed()) ? Zone : nullptr;
@@ -545,10 +637,13 @@ namespace
 		W.has_weapon = M.bArmed;
 		W.shield_potions = 0; // stock bots carry none yet; engine grant is next pass
 
-		// Circle center: the safe-zone indicator actor's live position. Radius: GameState
-		// NextRadius when this build has it, else the actor's own field, else neutral:
-		// center pinned to self so distance-to-edge reads "safely inside" and the brain
-		// never rotates toward a bogus world origin.
+		// ZONE TRUTH HIERARCHY: (1) the engine's own storm ladder parsed from its
+		// log -- its innermost center lies inside every ring, so it is always a
+		// safe destination; (2) a resolvable engine radius field (>10000uu); (3)
+		// JUNK: hold position. Matches 1/2: the 3.5 indicator sits at (0,0,0)
+		// with no radius field, and walking at that phantom origin marched the
+		// fleet west into terrain/water and then the storm killed them all --
+		// user directive: bots must NOT die to the storm.
 		auto World = GetWorld();
 		auto GS = World ? Cast<AFortGameStateAthena>(World->GetGameState()) : nullptr;
 		if (GS && !g_gsOffsetsTried)
@@ -564,16 +659,12 @@ namespace
 		if (GS && g_gsNextRadiusOff != -1)
 			Radius = GS->Get<float>(g_gsNextRadiusOff);
 
+		FVector CenterUu(0.f, 0.f, 0.f);
+		bool bHaveCenter = false;
 		if (g_zoneActor)
 		{
-			auto ZoneLoc = g_zoneActor->GetActorLocation();
-			W.circle_center_x = ToMeters((float)ZoneLoc.X);
-			W.circle_center_y = ToMeters((float)ZoneLoc.Y);
-			// Next-ring center unknown until the phase changes: assume it rides with the
-			// current one. Leaving this zero made RotateToCircle aim at the world origin
-			// (caught by the behavior sim: move_to stayed 0,0,0 under a rotation decision).
-			W.circle_next_center_x = W.circle_center_x;
-			W.circle_next_center_y = W.circle_center_y;
+			CenterUu = g_zoneActor->GetActorLocation();
+			bHaveCenter = true;
 
 			static int s_indRadiusOff = -2; // resolve once against the actor's own class
 			if (s_indRadiusOff == -2)
@@ -592,21 +683,39 @@ namespace
 			else
 				W.circle_shrink_in_secs = 0.f;
 		}
-		else
+
+		float FinalRadiusUu = Radius;
+		FVector FinalCenterUu = bHaveCenter ? CenterUu
+			: FVector(W.self_pos.x * 100.f, W.self_pos.y * 100.f, 0.f);
+		bool bTruth = Radius > 10000.f; // engine field or nothing (4000uu = junk fallback)
+		if (g_ladderParsed)
 		{
-			W.circle_center_x = W.self_pos.x;
-			W.circle_center_y = W.self_pos.y;
+			FinalCenterUu = FVector(g_ladderCX, g_ladderCY, 0.f);
+			FinalRadiusUu = g_ladderR;
+			bTruth = true;
 		}
+		g_zoneTruth = bTruth;
 
-		if (Radius <= 0.f)
-			Radius = 4000.f; // engine fallback, uu
-		Radius = ToMeters(Radius); // <- engine uu -> meters, same crossing as ToVec
-		W.circle_radius = Radius;
-
+		if (bTruth)
 		{
+			W.circle_center_x = ToMeters(FinalCenterUu.X);
+			W.circle_center_y = ToMeters(FinalCenterUu.Y);
+			W.circle_next_center_x = W.circle_center_x;
+			W.circle_next_center_y = W.circle_center_y;
+			W.circle_radius = ToMeters(FinalRadiusUu);
 			float dx = W.self_pos.x - W.circle_center_x;
 			float dy = W.self_pos.y - W.circle_center_y;
-			W.distance_to_circle_edge = std::sqrt(dx * dx + dy * dy) - Radius;
+			W.distance_to_circle_edge = std::sqrt(dx * dx + dy * dy) - W.circle_radius;
+		}
+		else
+		{
+			// No truth: read as safely inside so nothing walks at a phantom target.
+			W.circle_center_x = W.self_pos.x;
+			W.circle_center_y = W.self_pos.y;
+			W.circle_next_center_x = W.self_pos.x;
+			W.circle_next_center_y = W.self_pos.y;
+			W.circle_radius = 40.f;
+			W.distance_to_circle_edge = -50.f;
 		}
 
 		int loot30 = 0;
@@ -934,8 +1043,8 @@ void TickAll()
 		if (Now >= s_nextFleet)
 		{
 			s_nextFleet = Now + 15.0;
-			int alive = 0, deployed = 0, elim = 0;
-			long long firedSum = 0, movSum = 0;
+			int alive = 0, deployed = 0, elim = 0, evac = 0;
+			long long firedSum = 0, movSum = 0, walkOk = 0, walkBlk = 0;
 			float minx = 1e9f, maxx = -1e9f, miny = 1e9f, maxy = -1e9f;
 			for (size_t fi = 0; fi < bots.size(); fi++)
 			{
@@ -959,12 +1068,16 @@ void TickAll()
 					if (g_minds[fi].bElimLogged) elim++;
 					firedSum += g_minds[fi].fireCount;
 					movSum += g_minds[fi].moveCount;
+					walkOk += g_minds[fi].stepOk;
+					walkBlk += g_minds[fi].stepBlk;
+					if (g_minds[fi].bStormEvac) evac++;
 				}
 			}
 			if (alive == 0)
 				minx = maxx = miny = maxy = 0.f;
-			LOG_INFO(LogBots, "[ogfn] fleet t={:.0f} alive={} deployed={} elim={} fired={} mov={} bbox=({:.0f}..{:.0f},{:.0f}..{:.0f})m",
-				Now, alive, deployed, elim, firedSum, movSum, minx, maxx, miny, maxy);
+			LOG_INFO(LogBots, "[ogfn] fleet t={:.0f} alive={} deployed={} elim={} evac={} fired={} mov={} walk_ok={} walk_blk={} truth={} ladder={} bbox=({:.0f}..{:.0f},{:.0f}..{:.0f})m",
+				Now, alive, deployed, elim, evac, firedSum, movSum, walkOk, walkBlk,
+				(int)g_zoneTruth, (int)g_ladderParsed, minx, maxx, miny, maxy);
 		}
 	}
 
@@ -1097,6 +1210,43 @@ void TickAll()
 			}
 			// Ground pawns need no latch: the z>20000 gate alone self-terminates
 			// (probe only ever runs for high pawns, and a teleport ends that).
+		}
+
+		// STORM-EVAC (hard guarantee for "bots must not die to the storm"): once
+		// hurt while outside the FINAL ring, extract to its center. The ladder's
+		// innermost center is inside every ring, so the destination is safe in
+		// every phase. Fires only when the ladder parsed and hp drops outside --
+		// with the truth-walk working this should almost never trigger.
+		if (Phase == EAthenaGamePhase::SafeZones && g_ladderParsed && !M.bStormEvac
+			&& Pawn->GetHealth() > 0.f && Pawn->GetHealth() < 75.f)
+		{
+			auto P = Pawn->GetActorLocation();
+			float ex = (float)P.X - g_ladderCX;
+			float ey = (float)P.Y - g_ladderCY;
+			float limit = g_ladderR + 300.f;
+			if (ex * ex + ey * ey > limit * limit)
+			{
+				float ang = (float)i * 2.399963f;
+				float rr = 120.f + (float)(i % 5) * 90.f;
+				FVector Dest(g_ladderCX + std::cos(ang) * rr,
+				             g_ladderCY + std::sin(ang) * rr, (float)P.Z);
+				FHitResult* Gh = nullptr;
+				UKismetSystemLibrary::LineTraceSingle(Pawn,
+					FVector(Dest.X, Dest.Y, Dest.Z + 3000.f),
+					FVector(Dest.X, Dest.Y, Dest.Z - 40000.f),
+					ETraceTypeQuery::TraceTypeQuery1, false, TArray<AActor*>(),
+					EDrawDebugTrace::None, true, FLinearColor(), FLinearColor(), 0.f, &Gh);
+				if (Gh && Gh->IsBlockingHit())
+				{
+					FVector FL = Gh->GetLocation();
+					if (FL.Z >= Dest.Z - 40000.f && FL.Z <= Dest.Z + 3000.f)
+						Dest.Z = FL.Z + 100.f;
+				}
+				ApplyTeleport(Pawn, Dest);
+				M.bStormEvac = true;
+				LOG_INFO(LogBots, "[ogfn] STORM-EVAC bot#{} hp={:.0f} -> ({:.0f},{:.0f},{:.0f})",
+					(int)i, Pawn->GetHealth(), Dest.X, Dest.Y, Dest.Z);
+			}
 		}
 		if (M.bNeedsReequip)
 		{
@@ -1385,6 +1535,7 @@ void TickAll()
 						Want.Z = FL.Z + 100.f; // rest on floor, step-up <= head height
 				}
 
+				float StepX0 = Cur.X, StepY0 = Cur.Y;
 				if (!ApplyTeleportEx(Pawn, Want, /*bSweep*/ true))
 				{
 					// Blocked: slide like a real character before giving up the
@@ -1407,6 +1558,14 @@ void TickAll()
 					}
 				}
 				M.moveCount++;
+				{
+					auto NowPos = Pawn->GetActorLocation();
+					float moved = std::fabs((float)NowPos.X - StepX0) + std::fabs((float)NowPos.Y - StepY0);
+					if (moved > 0.5f)
+						M.stepOk++;
+					else
+						M.stepBlk++;
+				}
 			}
 		}
 
@@ -1430,6 +1589,14 @@ void TickAll()
 }
 
 #ifdef OGFN_HARNESS
+void TestSetLadder(float cx, float cy, float r)
+{
+	g_ladderCX = cx;
+	g_ladderCY = cy;
+	g_ladderR = r;
+	g_ladderParsed = true;
+}
+
 void TestClearBurstState(size_t i)
 {
 	if (i < g_minds.size())
