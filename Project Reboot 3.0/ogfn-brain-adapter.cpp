@@ -263,7 +263,15 @@ namespace
 			return;
 		}
 
-		auto AllWids = GetAllObjectsOfClass<UFortWorldItemDefinition>(WidClass);
+		// NOTE: GetAllObjectsOfClass<T> upstream has a dead-broken template body
+		// (push_back(UObject*) into vector<T*>) that had never been instantiated
+		// until this code; use the proven non-template overload and cast ourselves.
+		auto AllObjects = GetAllObjectsOfClass(WidClass);
+		std::vector<UFortWorldItemDefinition*> AllWids;
+		AllWids.reserve(AllObjects.size());
+		for (auto* Object : AllObjects)
+			if (auto* Wid = Cast<UFortWorldItemDefinition>(Object))
+				AllWids.push_back(Wid);
 
 		std::string dump;
 		for (auto Wid : AllWids)
