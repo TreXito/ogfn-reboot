@@ -713,6 +713,13 @@ void TickAll()
 
 				FVector WaveLand(0.f, 0.f, 1000.f);
 				ProbeLand(GMWave, FVector(Anchor.X, Anchor.Y, Anchor.Z + 3000.f), WaveLand);
+				static bool s_anchorLogged = false;
+				if (!s_anchorLogged)
+				{
+					s_anchorLogged = true;
+					LOG_INFO(LogBots, "[ogfn] wave anchor=({:.0f},{:.0f},{:.0f}) land=({:.0f},{:.0f},{:.0f})",
+						Anchor.X, Anchor.Y, Anchor.Z, WaveLand.X, WaveLand.Y, WaveLand.Z);
+				}
 
 				for (size_t wi = 0; wi < bots.size(); wi++)
 				{
@@ -733,10 +740,11 @@ void TickAll()
 					FVector Ring(Anchor.X + std::cos(WAngle) * WRadius,
 					             Anchor.Y + std::sin(WAngle) * WRadius, Anchor.Z);
 
-					// Land anchor is probed ONCE per wave pass (below); the ring sits
-					// around that land point, no per-ring trace.
-					FVector SpawnAt(WaveLand.X + (Ring.X - Anchor.X),
-					                WaveLand.Y + (Ring.Y - Anchor.Y), WaveLand.Z);
+					// Probe THE SPAWN'S OWN ring column (local floor under this exact
+					// point), with the ocean march as fallback.
+					FVector SpawnAt(0.f, 0.f, 0.f);
+					FVector RingCol(Ring.X, Ring.Y, Anchor.Z + 3000.f);
+					ProbeLand(WC, RingCol, SpawnAt);
 
 					FTransform Xf{};
 					Xf.Rotation = FQuat(0.f, 0.f, 0.f, 1.f);
@@ -862,12 +870,16 @@ void TickAll()
 			auto P = Pawn->GetActorLocation();
 			if (P.Z > 20000.f)
 			{
-				FVector Land(0.f, 0.f, 0.f);
-				bool bRealLand = ProbeLand(Pawn, P + FVector(0, 0, 3000.f), Land);
+				// Ring XY FIRST, then probe THE RING'S OWN COLUMN: using the anchor's
+				// floor height for an offset point buries the pawn inside a slope
+				// (live: z=1636 anchor on a mountain, ring pawn inside rock, every
+				// trace started in geometry -> los=0 even "on land").
 				float Angle = (float)i * 2.399963f; // golden angle: no stacking
 				float Radius = 400.f + (float)(i % 5) * 220.f;
-				Land.X += std::cos(Angle) * Radius;
-				Land.Y += std::sin(Angle) * Radius;
+				FVector Col(P.X + std::cos(Angle) * Radius,
+				             P.Y + std::sin(Angle) * Radius, P.Z + 3000.f);
+				FVector Land(0.f, 0.f, 0.f);
+				bool bRealLand = ProbeLand(Pawn, Col, Land);
 				ApplyTeleport(Pawn, Land);
 				M.bAutoLanded = true;
 				LOG_INFO(LogBots, "[ogfn] auto-landed bot#{} land={} z={:.0f} -> ({:.0f},{:.0f},{:.0f})",
