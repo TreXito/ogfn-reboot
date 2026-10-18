@@ -531,8 +531,12 @@ void TickAll()
 	// audio storm and most of the lobby CPU. Arming and auto-skin still run (they
 	// must: island IS warmup, and that is exactly when your pawn exists).
 	bool bWarmup = false;
+	EAthenaGamePhase Phase = EAthenaGamePhase::Warmup;
 	if (auto GS = Cast<AFortGameStateAthena>(World->GetGameState()))
-		bWarmup = (GS->GetGamePhase() == EAthenaGamePhase::Warmup);
+	{
+		Phase = GS->GetGamePhase();
+		bWarmup = (Phase == EAthenaGamePhase::Warmup);
+	}
 
 	{
 		static bool s_actOpen = false;
@@ -580,11 +584,12 @@ void TickAll()
 			}
 		}
 
-		static bool s_loggedEmptyGather = false;
-		if (Enemies.empty() && !s_loggedEmptyGather)
+		static EAthenaGamePhase s_gatherPhase = (EAthenaGamePhase)-1;
+		if (Phase != s_gatherPhase)
 		{
-			s_loggedEmptyGather = true;
-			LOG_ERROR(LogBots, "[ogfn] no usable enemy pawns for perception (first time, non-warmup)");
+			s_gatherPhase = Phase;
+			if (Enemies.empty())
+				LOG_ERROR(LogBots, "[ogfn] no usable enemy pawns for perception (phase change, empty)");
 		}
 	}
 
@@ -708,17 +713,19 @@ void TickAll()
 		M.decision = M.brain.think(W);
 
 		{
-			static bool s_firstObs = false;
-			if (!s_firstObs)
+			static EAthenaGamePhase s_obsPhase = (EAthenaGamePhase)-1;
+			static size_t s_obsBotIdx = 0;
+			if (&M == &g_minds[0] && Phase != s_obsPhase)
 			{
-				s_firstObs = true;
+				s_obsPhase = Phase;
 				int losCount = 0;
 				for (auto& S : Obs.enemies)
 					if (S.line_of_sight)
 						losCount++;
-				LOG_INFO(LogBots, "[ogfn] first obs: n={} los={} pos=({:.0f},{:.0f},{:.0f}) edge={:.0f} action={}",
+				LOG_INFO(LogBots, "[ogfn] obs@phase: n={} los={} pos=({:.0f},{:.0f},{:.0f}) edge={:.0f} action={} shootable={}",
 					(int)Obs.enemies.size(), losCount, W.self_pos.x, W.self_pos.y, W.self_pos.z,
-					W.distance_to_circle_edge, ogfn::to_string(M.decision.action));
+					W.distance_to_circle_edge, ogfn::to_string(M.decision.action), (int)W.target_is_visible);
+				(void)s_obsBotIdx;
 			}
 		}
 
