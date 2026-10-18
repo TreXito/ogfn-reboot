@@ -78,6 +78,7 @@ namespace
 
 	std::vector<Mind> g_minds;                 // index-parallel to AllPlayerBotsToTick
 	bool g_summaryLogged = false;
+	UFunction* g_moveCompSetModeFn = nullptr;   // resolved once at combat gate
 
 	// Runtime-resolved engine verbs (names differ per client build; resolve once,
 	// log the misses, never guess twice).
@@ -675,6 +676,31 @@ void TickAll()
 		{
 			s_actOpen = true;
 			LOG_INFO(LogBots, "[ogfn] combat gate open at SafeZones: perception+motor live");
+
+			// Movement diagnosis (one-shot): frozen vel + frozen pos with inputs
+			// flowing means CharacterMovement never integrates. Identify the
+			// component, ask it for Walking mode, and remember the verb for
+			// per-pawn application after each deploy.
+			if (!bots.empty() && bots[0].Controller)
+			{
+				auto P0 = Cast<AFortPlayerPawnAthena>(bots[0].Controller->GetPawn());
+				auto M0Off = P0 ? P0->GetOffset("CharacterMovement", false) : -1;
+				auto Move = (M0Off != -1) ? P0->Get<UObject*>(M0Off) : nullptr;
+				if (Move)
+				{
+					g_moveCompSetModeFn = Move->FindFunction("SetMovementMode");
+					LOG_INFO(LogBots, "[ogfn] movecomp class={} SetMovementModeFn={}",
+						Move->GetPathName(), (__int64)g_moveCompSetModeFn);
+					if (g_moveCompSetModeFn)
+					{
+						// TEnumAsByte<EMovementMode> at 0 (Walking=1), custom mode at 1.
+						alignas(16) unsigned char p[8] = {};
+						p[0] = 1;
+						Move->ProcessEvent(g_moveCompSetModeFn, p);
+						LOG_INFO(LogBots, "[ogfn] SetMovementMode(Walking) sent to bot0");
+					}
+				}
+			}
 		}
 	}
 
@@ -1065,11 +1091,26 @@ void TickAll()
 						P5Z = P5Loc.Z;
 						bGotP5 = true;
 						static bool s_jumpProbe = false;
+						static int s_jumpFollow = 0;
+						static float s_jumpZ0 = 0.f;
+						static float s_jumpDzMax = 0.f;
 						if (!s_jumpProbe)
 						{
 							s_jumpProbe = true;
+							s_jumpFollow = 60;
+							s_jumpZ0 = P5Z;
+							s_jumpDzMax = 0.f;
 							ApplyJump(P5);
 							LOG_INFO(LogBots, "[ogfn] jump probe: sent Jump verb to wave pawn#5");
+						}
+						else if (s_jumpFollow > 0)
+						{
+							s_jumpFollow--;
+							float dz = P5Z - s_jumpZ0;
+							if (dz > s_jumpDzMax)
+								s_jumpDzMax = dz;
+							if (s_jumpFollow == 0)
+								LOG_INFO(LogBots, "[ogfn] jump probe outcome: dzmax={:.1f}uu over 2s", s_jumpDzMax);
 						}
 					}
 				}
