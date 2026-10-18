@@ -420,6 +420,50 @@ namespace
 		return true;
 	}
 
+	// Deployable-ground probe: straight down first, then march toward world origin
+	// (island center) until z >= 0. The bus-end dump column is wherever the forced
+	// flight stopped, and one live run put ALL 50 bots on the ocean floor at
+	// z=-400uu, where every horizontal trace is blocked and nobody ever fights.
+	// Returns true when it found real land (z >= 0) inside the march; the fallback
+	// column is the island center, land by construction.
+	bool ProbeLand(UObject* Ctx, const FVector& Top, FVector& OutLand)
+	{
+		static const float kMarch[5] = { 0.f, 0.3f, 0.6f, 0.85f, 1.f };
+		FVector best(0.f, 0.f, -1e9f);
+		bool bBest = false;
+		for (float t : kMarch)
+		{
+			float x = Top.X + (0.f - Top.X) * t;
+			float y = Top.Y + (0.f - Top.Y) * t;
+			FHitResult* Hit = nullptr;
+			UKismetSystemLibrary::LineTraceSingle(Ctx,
+				FVector(x, y, Top.Z), FVector(x, y, Top.Z - 400000.f),
+				ETraceTypeQuery::TraceTypeQuery1, false, TArray<AActor*>(),
+				EDrawDebugTrace::None, true, FLinearColor(), FLinearColor(), 0.f, &Hit);
+			if (Hit && Hit->IsBlockingHit())
+			{
+				FVector L = Hit->GetLocation();
+				if (L.Z >= 0.f && L.Z < 25000.f)
+				{
+					OutLand = FVector(L.X, L.Y, L.Z + 100.f);
+					return true;
+				}
+				if (L.Z > best.Z)
+				{
+					best = L;
+					bBest = true;
+				}
+			}
+		}
+		if (bBest)
+		{
+			OutLand = FVector(best.X, best.Y, best.Z + 100.f);
+			return false;
+		}
+		OutLand = FVector(0.f, 0.f, 1000.f);
+		return false;
+	}
+
 	// Real line of sight between eye heights. The brain's perception is the only consumer,
 	// so this is the single place wallhack could leak in -- it must stay a trace.
 	// CONTEXT MATTERS: the WorldContextObject must be the observing PAWN, not the world.
@@ -666,6 +710,10 @@ void TickAll()
 			if (GMWave)
 			{
 				int pawnless = 0, spawned = 0;
+
+				FVector WaveLand(0.f, 0.f, 1000.f);
+				ProbeLand(GMWave, FVector(Anchor.X, Anchor.Y, Anchor.Z + 3000.f), WaveLand);
+
 				for (size_t wi = 0; wi < bots.size(); wi++)
 				{
 					auto& WB = bots[wi];
@@ -685,19 +733,10 @@ void TickAll()
 					FVector Ring(Anchor.X + std::cos(WAngle) * WRadius,
 					             Anchor.Y + std::sin(WAngle) * WRadius, Anchor.Z);
 
-					FVector Ground = Ring;
-					FHitResult* WDown = nullptr;
-					UKismetSystemLibrary::LineTraceSingle(WC,
-						Ring + FVector(0, 0, 3000.f), Ring + FVector(0, 0, -400000.f),
-						ETraceTypeQuery::TraceTypeQuery1, false, TArray<AActor*>(),
-						EDrawDebugTrace::None, true, FLinearColor(), FLinearColor(), 0.f, &WDown);
-					if (WDown && WDown->IsBlockingHit())
-					{
-						FVector HL = WDown->GetLocation();
-						if (HL.Z < Ring.Z + 3000.f - 1000.f) // start-relative: rejects roof hits at any altitude
-							Ground = HL;
-					}
-					FVector SpawnAt(Ground.X, Ground.Y, Ground.Z + 100.f);
+					// Land anchor is probed ONCE per wave pass (below); the ring sits
+					// around that land point, no per-ring trace.
+					FVector SpawnAt(WaveLand.X + (Ring.X - Anchor.X),
+					                WaveLand.Y + (Ring.Y - Anchor.Y), WaveLand.Z);
 
 					FTransform Xf{};
 					Xf.Rotation = FQuat(0.f, 0.f, 0.f, 1.f);
@@ -818,52 +857,21 @@ void TickAll()
 		// mutually occluded capsules. The probe starts 3000uu above the pawn so an
 		// early roof/actor hit cannot pass as ground; a near-start hit just
 		// retries after the aircraft actor tears down.
-		if (!bWarmup && Phase == EAthenaGamePhase::SafeZones && !M.bAutoLanded && Now >= M.nextLandTry)
+		if (!bWarmup && Phase == EAthenaGamePhase::SafeZones && !M.bAutoLanded)
 		{
 			auto P = Pawn->GetActorLocation();
 			if (P.Z > 20000.f)
 			{
-				FHitResult* Down = nullptr;
-				UKismetSystemLibrary::LineTraceSingle(Pawn,
-					P + FVector(0, 0, 3000.f), P + FVector(0, 0, -400000.f),
-					ETraceTypeQuery::TraceTypeQuery1, false, TArray<AActor*>(),
-					EDrawDebugTrace::None, true, FLinearColor(), FLinearColor(), 0.f, &Down);
-				if (Down && Down->IsBlockingHit())
-				{
-					FVector Landing = Down->GetLocation();
-					if (Landing.Z < P.Z - 1000.f)
-					{
-						float Angle = (float)i * 2.399963f; // golden angle: no stacking
-						float Radius = 400.f + (float)(i % 5) * 220.f;
-						Landing.X += std::cos(Angle) * Radius;
-						Landing.Y += std::sin(Angle) * Radius;
-						Landing.Z += 100.f;
-						ApplyTeleport(Pawn, Landing);
-						M.bAutoLanded = true;
-						LOG_INFO(LogBots, "[ogfn] auto-landed bot#{} z={:.0f} -> ({:.0f},{:.0f},{:.0f})",
-							(int)i, P.Z, Landing.X, Landing.Y, Landing.Z);
-					}
-					else
-					{
-						M.nextLandTry = Now + 2.0;
-						static bool s_nearHit = false;
-						if (!s_nearHit)
-						{
-							s_nearHit = true;
-							LOG_ERROR(LogBots, "[ogfn] auto-land: first hit near start, not ground (waiting for teardown)");
-						}
-					}
-				}
-				else
-				{
-					M.nextLandTry = Now + 2.0;
-					static bool s_noGround = false;
-					if (!s_noGround)
-					{
-						s_noGround = true;
-						LOG_ERROR(LogBots, "[ogfn] auto-land: no hit under drop column");
-					}
-				}
+				FVector Land(0.f, 0.f, 0.f);
+				bool bRealLand = ProbeLand(Pawn, P + FVector(0, 0, 3000.f), Land);
+				float Angle = (float)i * 2.399963f; // golden angle: no stacking
+				float Radius = 400.f + (float)(i % 5) * 220.f;
+				Land.X += std::cos(Angle) * Radius;
+				Land.Y += std::sin(Angle) * Radius;
+				ApplyTeleport(Pawn, Land);
+				M.bAutoLanded = true;
+				LOG_INFO(LogBots, "[ogfn] auto-landed bot#{} land={} z={:.0f} -> ({:.0f},{:.0f},{:.0f})",
+					(int)i, (int)bRealLand, P.Z, Land.X, Land.Y, Land.Z);
 			}
 			else
 			{

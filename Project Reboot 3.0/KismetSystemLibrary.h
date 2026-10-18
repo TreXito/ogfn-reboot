@@ -155,7 +155,12 @@ public:
 		static auto bIgnoreSelfOffset = FindOffsetStruct("/Script/Engine.KismetSystemLibrary.LineTraceSingle", "bIgnoreSelf");
 
 		static auto ParamsSize = LineTraceSingleFn->GetPropertiesSize();
-		auto Params = Alloc(ParamsSize);
+		// Persistent buffer: *OutHit points INTO Params, so callers read it after we
+		// return (freeing here would be a use-after-free), and the old per-call Alloc
+		// leaked a whole committed 4KB page per trace. With bot perception live at
+		// 3-4k traces/s that was ~14MB/s (measured 3.5 -> 6.7GB over one 220s soak).
+		// Reused buffer = zero leak, same read-after-return contract. Game thread only.
+		static void* Params = Alloc(ParamsSize);
 
 		((UKismetSystemLibrary_LineTraceSingle_Params*)Params)->WorldContextObject = WorldContextObject;
 		((UKismetSystemLibrary_LineTraceSingle_Params*)Params)->Start = Start;
