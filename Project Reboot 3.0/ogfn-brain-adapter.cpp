@@ -859,6 +859,12 @@ void TickAll()
 		{
 			uintptr_t key = (uintptr_t)Pawn;
 			uint64_t seed = (uint64_t)key * 2654435761ull ^ (uint64_t)(i + 1);
+#ifdef OGFN_HARNESS
+			// Deterministic seeds in the behavior sim: ASLR pointers made personas
+			// differ per run and P2 occasionally rolled a persona whose trigger
+			// discipline never opened inside the 6s window (intermittent P2 FAIL).
+			seed = 0x9E3779B97F4A7C15ull + (uint64_t)(i + 1) * 0x100000001B3ull;
+#endif
 			float skill = (float)((key >> 3) % 40) / 39.f - 0.5f; // spread over [-0.5, 0.5]
 			M.Reseed(seed, skill);
 			M.bSeeded = true;
@@ -1025,14 +1031,46 @@ void TickAll()
 							bAttached = Root->Get<UObject*>(ParentOff) != nullptr;
 					}
 				}
+				FVector VelAll;
+				int MoveMode = -1;
+				UObject* MoveComp = nullptr;
 				auto MoveOff = Pawn->GetOffset("CharacterMovement", false);
 				if (MoveOff != -1)
+					MoveComp = Pawn->Get<UObject*>(MoveOff);
+				if (MoveComp)
 				{
-					if (auto Move = Pawn->Get<UObject*>(MoveOff))
+					auto VelOff = MoveComp->GetOffset("Velocity", false);
+					if (VelOff != -1)
 					{
-						auto VelOff = Move->GetOffset("Velocity", false);
-						if (VelOff != -1)
-							velZ = Move->Get<FVector>(VelOff).Z;
+						VelAll = MoveComp->Get<FVector>(VelOff);
+						velZ = VelAll.Z;
+					}
+					auto ModeOff = MoveComp->GetOffset("MovementMode", false);
+					if (ModeOff != -1)
+						MoveMode = (int)*(unsigned char*)((char*)MoveComp + ModeOff);
+				}
+
+				// Second tracked pawn: a WAVE spawn (bot#5). bot0 is teleported by
+				// auto-land; if only bot0 is frozen, the teleport is the suspect; if
+				// both are frozen, movement never simulates for server pawns at all.
+				FVector P5Loc(0.f, 0.f, 0.f);
+				bool bGotP5 = false;
+				float P5Z = 0.f;
+				if (bots.size() > 5 && bots[5].Controller)
+				{
+					auto P5 = Cast<AFortPlayerPawnAthena>(bots[5].Controller->GetPawn());
+					if (PawnUsable(P5))
+					{
+						P5Loc = P5->GetActorLocation();
+						P5Z = P5Loc.Z;
+						bGotP5 = true;
+						static bool s_jumpProbe = false;
+						if (!s_jumpProbe)
+						{
+							s_jumpProbe = true;
+							ApplyJump(P5);
+							LOG_INFO(LogBots, "[ogfn] jump probe: sent Jump verb to wave pawn#5");
+						}
 					}
 				}
 
@@ -1077,11 +1115,12 @@ void TickAll()
 					EDrawDebugTrace::None, true, FLinearColor(), FLinearColor(), 0.f, &SkyHit);
 				bool bSkyLos = !SkyHit || !SkyHit->IsBlockingHit();
 
-				LOG_INFO(LogBots, "[ogfn] track z={:.0f} pos=({:.0f},{:.0f}) n={} los={} shootable={} fired={} mov={} attached={} velZ={:.0f} skyLOS={} bus=({},{},{})",
-					W.self_pos.z, W.self_pos.x, W.self_pos.y,
+				LOG_INFO(LogBots, "[ogfn] track z={:.0f} pos=({:.0f},{:.0f}) yaw={:.0f} n={} los={} shootable={} fired={} mov={} mode={} vel=({:.0f},{:.0f},{:.0f}) p5=({:.0f},{:.0f},{:.0f}) skyLOS={}",
+					W.self_pos.z, W.self_pos.x, W.self_pos.y, Obs.self_yaw_deg,
 					(int)Obs.enemies.size(), (int)W.target_is_visible, (int)M.decision.fire,
-					M.fireCount, M.moveCount, (int)bAttached, velZ, (int)bSkyLos,
-					bGotBus ? BusLoc.X : -1.f, bGotBus ? BusLoc.Y : -1.f, bGotBus ? BusLoc.Z : -1.f);
+					M.fireCount, M.moveCount, MoveMode, VelAll.X, VelAll.Y, VelAll.Z,
+					bGotP5 ? P5Loc.X : -1.f, bGotP5 ? P5Loc.Y : -1.f, P5Z,
+					(int)bSkyLos);
 			}
 			if (&M == &g_minds[0] && Phase != s_obsPhase)
 			{
