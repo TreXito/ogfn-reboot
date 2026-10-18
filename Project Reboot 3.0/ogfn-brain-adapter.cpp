@@ -579,6 +579,13 @@ void TickAll()
 					Enemies.push_back({ PawnId(HumanPawn), HumanPawn });
 			}
 		}
+
+		static bool s_loggedEmptyGather = false;
+		if (Enemies.empty() && !s_loggedEmptyGather)
+		{
+			s_loggedEmptyGather = true;
+			LOG_ERROR(LogBots, "[ogfn] no usable enemy pawns for perception (first time, non-warmup)");
+		}
 	}
 
 	for (size_t i = 0; i < bots.size(); i++)
@@ -699,6 +706,21 @@ void TickAll()
 
 		ogfn::WorldSnapshot W = BuildSnapshot(M, Pawn, enemiesSeenWithin30, Now);
 		M.decision = M.brain.think(W);
+
+		{
+			static bool s_firstObs = false;
+			if (!s_firstObs)
+			{
+				s_firstObs = true;
+				int losCount = 0;
+				for (auto& S : Obs.enemies)
+					if (S.line_of_sight)
+						losCount++;
+				LOG_INFO(LogBots, "[ogfn] first obs: n={} los={} pos=({:.0f},{:.0f},{:.0f}) edge={:.0f} action={}",
+					(int)Obs.enemies.size(), losCount, W.self_pos.x, W.self_pos.y, W.self_pos.z,
+					W.distance_to_circle_edge, ogfn::to_string(M.decision.action));
+			}
+		}
 
 #ifdef OGFN_SIM_TRACE
 		if (&M == &g_minds[0] && (int)(Now * 10.0) % 6 == 0)
