@@ -434,11 +434,9 @@ namespace Bots
 			// the controller.
 			if (PlayerBot.bIsAthenaController && CurrentPlayerState->IsInAircraft())
 			{
-				if (!CurrentPlayerState->HasThankedBusDriver())
-				{
-					static auto ServerThankBusDriverFn = FindObject<UFunction>(L"/Script/FortniteGame.FortPlayerControllerAthena.ServerThankBusDriver");
-					CurrentPlayer->ProcessEvent(ServerThankBusDriverFn);
-				}
+				// The upstream thank-bus ProcessEvent removed: its body derefs something
+				// absent in server-side flight context (AV reading 0x88 from Tick:445,
+				// soak-3) for a purely cosmetic line. Nothing of value lost.
 
 				// One staggered jump per bot, 2..31s into the flight: path-spread drops
 				// instead of the old commented-out TODO's ride-to-bus-end.
@@ -472,7 +470,17 @@ namespace Bots
 			// or mid-lifecycle (RestartPlayerAtPlayerStart) -- any of which used to
 			// take the tick down (ReadBitfield NULL, then GetActorLocation vcall 0x0).
 			if (!CurrentPawn || !CurrentPawn->IsValidLowLevel() || CurrentPawn->IsActorBeingDestroyed())
+			{
+				// One-shot per session, only interesting during the flight: if bot pawns
+				// are absent mid-air, the deploy jump path needs the same treatment.
+				static bool s_loggedAirPawnNull = false;
+				if (!s_loggedAirPawnNull && GameState->GetGamePhase() == EAthenaGamePhase::Aircraft)
+				{
+					s_loggedAirPawnNull = true;
+					LOG_ERROR(LogBots, "[ogfn] aircraft phase: bot pawn null/unusable at loop-top (once)");
+				}
 				continue;
+			}
 
 			if (GameState->GetGamePhase() == EAthenaGamePhase::Warmup)
 			{
