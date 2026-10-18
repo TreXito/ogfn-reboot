@@ -87,7 +87,6 @@ extern inline bool bDebugPrintLooting = false;
 extern inline bool bDebugPrintFloorLoot = false;
 extern inline bool bDebugPrintSwapping = false;
 extern inline bool bEnableBotTick = true;
-extern inline bool bEnableOgfnBrain = true;  // ogfn-brain-adapter: perception+utility+motor bots
 extern inline bool bZoneReversing = false;
 extern inline bool bEnableCombinePickup = false;
 extern inline int AmountOfBotsToSpawn = 20;

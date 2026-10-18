@@ -338,7 +338,8 @@ namespace
 		UKismetSystemLibrary::LineTraceSingle(GetWorld(),
 			A + FVector(0, 0, kTraceEyeOffset), B + FVector(0, 0, kTraceEyeOffset),
 			ETraceTypeQuery::TraceTypeQuery1, false, TArray<AActor*>(),
-			EDrawDebugTrace::None, &Hit, true, FLinearColor(), FLinearColor(), 0.f);
+			EDrawDebugTrace::None, /*bIgnoreSelf*/ true, FLinearColor(), FLinearColor(),
+			0.f, /*OutHit*/ &Hit);
 		return !Hit || !Hit->IsBlockingHit();
 	}
 

@@ -21,7 +21,7 @@ class Rng {
   float lognormal_median(float median_s, float sigma) {
     if (median_s <= 0.f) return 0.f;
     const float mu = std::log(median_s);
-    return std::lognormal_distribution<float>(mu, std::max(1e-4f, sigma))(eng_);
+    return std::lognormal_distribution<float>(mu, (std::max)(1e-4f, sigma))(eng_);
   }
 
  private:

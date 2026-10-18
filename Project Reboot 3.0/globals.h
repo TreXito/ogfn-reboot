@@ -6,7 +6,8 @@
 
 namespace Globals
 {
-	extern inline bool bCreative = false;
+	extern inline bool bEnableOgfnBrain = true; // ogfn-brain-adapter: perception+utility+motor bots
+extern inline bool bCreative = false;
 	extern inline bool bGoingToPlayEvent = false;
 	extern inline bool bEnableAGIDs = true;
 	extern inline bool bNoMCP = true;

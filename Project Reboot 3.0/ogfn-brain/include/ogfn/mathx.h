@@ -21,7 +21,7 @@ inline Vec3 normalized(const Vec3& v) {
   const float l = length(v);
   return l > 1e-6f ? v * (1.f / l) : Vec3{};
 }
-inline float clampf(float v, float lo, float hi) { return std::max(lo, std::min(hi, v)); }
+inline float clampf(float v, float lo, float hi) { return (std::max)(lo, (std::min)(hi, v)); }
 inline float lerpf(float a, float b, float t) { return a + (b - a) * clampf(t, 0.f, 1.f); }
 
 constexpr float kPi = 3.14159265358979323846f;

@@ -14,9 +14,9 @@ struct UKismetSystemLibrary
 {
 	static bool LineTraceSingle(UObject* /*world*/, FVector Start, FVector End,
 	                            ETraceTypeQuery /*channel*/, bool /*complex*/,
-	                            TArray<AActor*> /*ignore*/, EDrawDebugTrace /*debug*/,
-	                            FHitResult** OutHit, bool /*ignoreSelf*/,
-	                            FLinearColor, FLinearColor, float)
+	                            TArray<AActor*> /*ignore*/, EDrawDebugTrace /*debug*/, bool /*ignoreSelf*/,
+	                            FLinearColor, FLinearColor, float,
+	                            FHitResult** OutHit)
 	{
 		bool bClear = Harness::g_losFn ? Harness::g_losFn(Start, End) : true;
 		if (OutHit)
