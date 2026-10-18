@@ -42,6 +42,8 @@ namespace OgfnBot
 namespace
 {
 	constexpr double kZoneRefreshSecs = 2.0;
+		constexpr double kWaveCadenceSecs = 2.0;
+		constexpr int kWaveMaxAttempts = 30;
 	constexpr double kLootRefreshSecs = 0.5;
 	constexpr float kMoveMinDist = 250.f;      // decision points closer than this are "hold here"
 	constexpr float kTraceEyeOffset = 60.f;    // trace between heads, not feet
@@ -55,6 +57,8 @@ namespace
 		bool bSeeded = false;
 		bool bArmed = false;
 		bool bAutoLanded = false;   // bus-dump place-once flag (see the auto-land block)
+		bool bNeedsReequip = false; // wave respawn: rebind the controller's rifle to the new pawn
+		FGuid armGuid;              // guid of the granted rifle (equip-only path, no re-add)
 		double nextArmTry = 0.0;
 		double nextLandTry = 0.0;   // retry clock for a rejected ground probe
 		double lastTick = 0.0;
@@ -402,6 +406,7 @@ namespace
 
 		auto Instance = Res.first.front();
 		AFortPlayerController::ServerExecuteInventoryItemHook(Controller, Instance->GetItemEntry()->GetItemGuid());
+		M.armGuid = Instance->GetItemEntry()->GetItemGuid(); // stored for equip-only rebinds (pawn swaps)
 
 		LOG_INFO(LogBots, "[ogfn] armed: {}", g_weaponCands[idx]->GetPathName());
 		M.bArmed = true;
@@ -608,6 +613,121 @@ void TickAll()
 		RefreshLoot(Now);
 	}
 
+	// Respawn wave (post-burst fix): at SafeZones entry the engine restarts EVERY
+	// bot at ONE transform (the bus-end column). The first ~5 spawn, the rest die
+	// on spawn collision ("failed to spawn a pawn", live Enter=50/Exit=5) and sit
+	// pawnless for the whole match, which is why nobody fights. Re-run the engine's
+	// own restart for the pawnless ones with per-bot golden-angle ring transforms
+	// probed to the ground, every 2s while any remain, radius jittering on retries.
+	// A missed ground probe spawns high on purpose: the auto-land block below then
+	// places that pawn (bAutoLanded only latches for ground spawns).
+	if (Phase == EAthenaGamePhase::SafeZones)
+	{
+		static double s_nextWave = 0.0;
+		static int s_waveAttempt = 0;
+		static bool s_gaveUpLogged = false;
+		if (Now >= s_nextWave)
+		{
+			s_nextWave = Now + kWaveCadenceSecs;
+
+			// Ring anchor: prefer a pawn still at bus altitude (the dump column),
+			// else any usable fleet pawn, else the observed default column.
+			FVector Anchor(137200.f, -92794.f, 81536.f);
+			bool bAnchor = false;
+			for (auto& AB : bots)
+			{
+				if (!AB.Controller || !AB.Controller->IsValidLowLevel())
+					continue;
+				auto AP = Cast<AFortPlayerPawnAthena>(AB.Controller->GetPawn());
+				if (!PawnUsable(AP))
+					continue;
+				auto L = AP->GetActorLocation();
+				if (!bAnchor)
+				{
+					Anchor = L;
+					bAnchor = true;
+				}
+				if (L.Z > 20000.f)
+				{
+					Anchor = L;
+					break;
+				}
+			}
+
+			auto GMWave = Cast<AFortGameModeAthena>(World->GetGameMode());
+			if (GMWave)
+			{
+				int pawnless = 0, spawned = 0;
+				for (size_t wi = 0; wi < bots.size(); wi++)
+				{
+					auto& WB = bots[wi];
+					if (!WB.Controller || !WB.Controller->IsValidLowLevel())
+						continue;
+					auto WC = Cast<AFortPlayerControllerAthena>(WB.Controller);
+					if (!WC)
+						continue;
+					if (PawnUsable(Cast<AFortPlayerPawnAthena>(WC->GetPawn())))
+						continue;
+					pawnless++;
+					if (s_waveAttempt >= kWaveMaxAttempts)
+						continue;
+
+					float WAngle = (float)wi * 2.399963f; // golden angle, same family as auto-land
+					float WRadius = 500.f + (float)(wi % 5) * 230.f + (float)s_waveAttempt * 137.f;
+					FVector Ring(Anchor.X + std::cos(WAngle) * WRadius,
+					             Anchor.Y + std::sin(WAngle) * WRadius, Anchor.Z);
+
+					FVector Ground = Ring;
+					FHitResult* WDown = nullptr;
+					UKismetSystemLibrary::LineTraceSingle(WC,
+						Ring + FVector(0, 0, 3000.f), Ring + FVector(0, 0, -400000.f),
+						ETraceTypeQuery::TraceTypeQuery1, false, TArray<AActor*>(),
+						EDrawDebugTrace::None, true, FLinearColor(), FLinearColor(), 0.f, &WDown);
+					if (WDown && WDown->IsBlockingHit())
+					{
+						FVector HL = WDown->GetLocation();
+						if (HL.Z < Ring.Z + 3000.f - 1000.f) // start-relative: rejects roof hits at any altitude
+							Ground = HL;
+					}
+					FVector SpawnAt(Ground.X, Ground.Y, Ground.Z + 100.f);
+
+					FTransform Xf{};
+					Xf.Rotation = FQuat(0.f, 0.f, 0.f, 1.f);
+					Xf.Translation = SpawnAt;
+					Xf.Scale3D = FVector(1.f, 1.f, 1.f);
+					GMWave->RestartPlayerAtTransform(WC, Xf);
+
+					auto Fresh = Cast<AFortPlayerPawnAthena>(WC->GetPawn());
+					if (PawnUsable(Fresh))
+					{
+						spawned++;
+						if (SpawnAt.Z <= 20000.f)
+							g_minds[wi].bAutoLanded = true; // on the ground already; else auto-land picks it up
+						g_minds[wi].bNeedsReequip = true;  // controller keeps the island rifle; bind it to this pawn
+						LOG_INFO(LogBots, "[ogfn] wave respawned bot#{} at ({:.0f},{:.0f},{:.0f})",
+							(int)wi, SpawnAt.X, SpawnAt.Y, SpawnAt.Z);
+					}
+				}
+				if (pawnless > 0)
+				{
+					s_waveAttempt++;
+					LOG_INFO(LogBots, "[ogfn] respawn wave: pawnless={} spawned={} attempt={}",
+						pawnless, spawned, s_waveAttempt);
+					if (spawned == 0 && s_waveAttempt >= kWaveMaxAttempts && !s_gaveUpLogged)
+					{
+						s_gaveUpLogged = true;
+						LOG_ERROR(LogBots, "[ogfn] respawn wave GAVE UP: {} pawns still missing after {} attempts",
+							pawnless, s_waveAttempt);
+					}
+				}
+				else
+				{
+					s_waveAttempt = 0;
+				}
+			}
+		}
+	}
+
 	// Enemy pawn set for this pass: every other fleet bot plus every human client
 	// pawn, read FRESH from the controller each tick (respawns replace the cached
 	// PlayerBot.Pawn pointer, which never gets refreshed upstream).
@@ -741,6 +861,12 @@ void TickAll()
 			{
 				M.bAutoLanded = true; // already on the ground: done, stop checking
 			}
+		}
+		if (M.bNeedsReequip)
+		{
+			M.bNeedsReequip = false;
+			AFortPlayerController::ServerExecuteInventoryItemHook(Controller, M.armGuid);
+			LOG_INFO(LogBots, "[ogfn] re-equipped rifle on new pawn (bot#{})", (int)i);
 		}
 		if (!M.bArmed && Now >= M.nextArmTry)
 		{

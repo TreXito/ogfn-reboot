@@ -44,6 +44,8 @@ struct FVector
 };
 
 struct FRotator { float Pitch, Yaw, Roll; };
+struct FQuat { float X, Y, Z, W; FQuat(float x = 0, float y = 0, float z = 0, float w = 1) : X(x), Y(y), Z(z), W(w) {} };
+struct FTransform { FQuat Rotation; FVector Translation; FVector Scale3D; };
 struct FLinearColor { float R = 0, G = 0, B = 0, A = 0; };
 struct FGuid { int v = 0; };
 

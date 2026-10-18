@@ -255,6 +255,42 @@ int main()
 		EXPECT(!anyPairSame, "no two bots share one landing coordinate (spread)");
 	}
 
+	// ---------- P6: burst victims -> respawn wave ----------
+	// Live engine burst leaves all but ~5 controllers pawnless (spawn collision at
+	// one shared transform). The wave must give every pawnless controller a fresh
+	// pawn at a DISTINCT ground point and rebind that controller's rifle.
+	std::printf("\n-- P6: pawnless controllers, respawn wave (3s) --\n");
+	int equipBeforeP6 = AFortPlayerController::equipCalls;
+	int victims = 0;
+	for (size_t x = 5; x < AllPlayerBotsToTick.size(); x++)
+	{
+		AllPlayerBotsToTick[x].Controller->MyPawn = nullptr; // burst-collision state
+		victims++;
+	}
+	TickFor(3.0);
+
+	{
+		int restored = 0, onGround = 0, reequipped = 0;
+		bool anySame = false;
+		for (size_t x = 5; x < AllPlayerBotsToTick.size(); x++)
+		{
+			auto MP = AllPlayerBotsToTick[x].Controller->MyPawn;
+			if (MP) restored++;
+			if (MP && MP->Location.Z >= 0.f && MP->Location.Z < 300.f) onGround++;
+			for (size_t y = x + 1; y < AllPlayerBotsToTick.size(); y++)
+			{
+				auto Other = AllPlayerBotsToTick[y].Controller->MyPawn;
+				if (MP && Other && MP->Location.X == Other->Location.X && MP->Location.Y == Other->Location.Y)
+					anySame = true;
+			}
+		}
+		reequipped = AFortPlayerController::equipCalls - equipBeforeP6;
+		EXPECT(restored == victims, "every pawnless controller got a pawn back");
+		EXPECT(onGround == victims, "wave pawns spawn on the ground (no sky spawns)");
+		EXPECT(!anySame, "wave pawns land at distinct coordinates (no re-collision)");
+		EXPECT(reequipped == victims, "every wave pawn re-bound its controller's rifle");
+	}
+
 	// ---------- summary ----------
 	std::printf("\n=== summary ===\n");
 	std::printf("  pawn0: rot=%d move=%d jump=%d fire=%d firstFire=%.2fs\n",
