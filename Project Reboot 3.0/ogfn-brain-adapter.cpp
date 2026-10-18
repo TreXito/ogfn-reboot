@@ -511,11 +511,11 @@ void TickAll()
 		static bool s_forced = false;
 		if (!s_forced)
 		{
-			FILE* f = std::fopen("C:\\ogfn\\FORCE_BUS.txt", "r");
-			if (f)
+			FILE* f = nullptr;
+			if (fopen_s(&f, "C:\\ogfn\\FORCE_BUS.txt", "r") == 0 && f)
 			{
 				std::fclose(f);
-				std::remove("C:\\ogfn\\FORCE_BUS.txt");
+				DeleteFileA("C:\\ogfn\\FORCE_BUS.txt"); // Win32: fopen/remove are C4996 errors here
 				if (auto GM = Cast<AFortGameModeAthena>(World->GetGameMode()))
 				{
 					GM->StartAircraftPhase();
