@@ -378,6 +378,11 @@ namespace
 			auto ZoneLoc = g_zoneActor->GetActorLocation();
 			W.circle_center_x = (float)ZoneLoc.X;
 			W.circle_center_y = (float)ZoneLoc.Y;
+			// Next-ring center unknown until the phase changes: assume it rides with the
+			// current one. Leaving this zero made RotateToCircle aim at the world origin
+			// (caught by the behavior sim: move_to stayed 0,0,0 under a rotation decision).
+			W.circle_next_center_x = (float)ZoneLoc.X;
+			W.circle_next_center_y = (float)ZoneLoc.Y;
 
 			static int s_indRadiusOff = -2; // resolve once against the actor's own class
 			if (s_indRadiusOff == -2)
@@ -387,8 +392,14 @@ namespace
 
 			float StartShrink = g_zoneActor->GetSafeZoneStartShrinkTime();
 			float FinishShrink = g_zoneActor->GetSafeZoneFinishShrinkTime();
-			W.circle_shrink_in_secs = (Now < FinishShrink)
-				? ogfn::clampf((float)(FinishShrink - Now), 0.f, 600.f) : 0.f;
+			// Seconds until the zone next does something: time-to-shrink while holding,
+			// remaining time while shrinking, 0 once settled.
+			if (Now < StartShrink)
+				W.circle_shrink_in_secs = ogfn::clampf((float)(StartShrink - Now), 0.f, 600.f);
+			else if (Now < FinishShrink)
+				W.circle_shrink_in_secs = ogfn::clampf((float)(FinishShrink - Now), 0.f, 600.f);
+			else
+				W.circle_shrink_in_secs = 0.f;
 		}
 		else
 		{
@@ -568,6 +579,18 @@ void TickAll()
 
 		ogfn::WorldSnapshot W = BuildSnapshot(M, Pawn, enemiesSeenWithin30, Now);
 		M.decision = M.brain.think(W);
+
+#ifdef OGFN_SIM_TRACE
+		if (&M == &g_minds[0] && (int)(Now * 10.0) % 6 == 0)
+		{
+			auto* near = M.brain.perception().nearest(true);
+			std::printf("[sim] t=%.2f obs=%d targets=%d near=%d dec=%s move=(%.0f,%.0f,%.0f) fire=%d edge=%.0f vis=%d\n",
+				Now, (int)Obs.enemies.size(), (int)M.brain.perception().targets().size(),
+				near ? 1 : 0, ogfn::to_string(M.decision.action),
+				M.decision.move_to.x, M.decision.move_to.y, M.decision.move_to.z,
+				(int)M.decision.fire, W.distance_to_circle_edge, (int)W.target_is_visible);
+		}
+#endif
 
 		// Motor every tick: aim tracking with servo degradation, or idle scanning.
 		auto* Target = M.brain.perception().nearest(true);
