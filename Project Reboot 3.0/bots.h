@@ -425,44 +425,15 @@ namespace Bots
 				)
 				continue;
 
-			// Bus-phase logic runs BEFORE the pawn guard, deliberately. Soak evidence:
-			// all 50 bots logged EnterAircraft, yet zero deploys reached this code and
-			// the engine force-dumped everyone at bus end -- during the flight the pawn
-			// is not reliably held, and the pawn-guard `continue` swallowed the whole
-			// body. Neither piece here needs the pawn: the thank/deploy state lives on
-			// the PlayerState (already held), and ServerAttemptAircraftJumpHook takes
-			// the controller.
-			if (PlayerBot.bIsAthenaController && CurrentPlayerState->IsInAircraft())
-			{
-				// The upstream thank-bus ProcessEvent removed: its body derefs something
-				// absent in server-side flight context (AV reading 0x88 from Tick:445,
-				// soak-3) for a purely cosmetic line. Nothing of value lost.
-
-				// One staggered jump per bot, 2..31s into the flight: path-spread drops
-				// instead of the old commented-out TODO's ride-to-bus-end.
-				if (!PlayerBot.bBusJumpScheduled)
-				{
-					PlayerBot.bBusJumpScheduled = true;
-					PlayerBot.NextBusJumpTime = UGameplayStatics::GetTimeSeconds(GetWorld()) + (float)(rand() % 30 + 2);
-					LOG_INFO(LogBots, "[ogfn] deploy scheduled");
-				}
-
-				if (UGameplayStatics::GetTimeSeconds(GetWorld()) >= PlayerBot.NextBusJumpTime)
-				{
-					if (auto AsPC = Cast<AFortPlayerController>(CurrentPlayer))
-					{
-						AFortPlayerController::ServerAttemptAircraftJumpHook(AsPC, FRotator());
-						LOG_INFO(LogBots, "[ogfn] bot deploying from bus");
-					}
-				}
-			}
-			else if (GameState->GetGamePhase() == EAthenaGamePhase::Aircraft &&
-			         PlayerBot.bIsAthenaController && !CurrentPlayerState->IsInAircraft() && !PlayerBot.bBusJumpScheduled)
-			{
-				// One-shot: phase says Aircraft but this bot has no in-aircraft state.
-				PlayerBot.bBusJumpScheduled = true;
-				LOG_ERROR(LogBots, "[ogfn] bot NOT in aircraft state during flight -- stranded check");
-			}
+			// Bus-phase verdict after four soaks, all evidence-driven:
+			// - thank-bus ProcessEvent removed: AV reading 0x88 in server flight
+			//   context (cosmetic only).
+			// - staggered self-jump removed: bot pawns are genuinely absent mid-flight
+			//   (one-shot diagnostic below confirmed it), so the engine's own jump
+			//   no-ops; attempts spammed 200k+ no-op ProcessEvents per match.
+			// - actual deployment is the ENGINE's forced bus-end exit (ExitAircraft
+			//   x50 at flight end, verified) -- bots land in the match, path-spread
+			//   drops remain future work tied to a pawn-presence solution.
 
 			auto CurrentPawn = CurrentPlayer->GetPawn();
 

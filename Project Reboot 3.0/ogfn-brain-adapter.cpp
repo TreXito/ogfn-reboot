@@ -534,6 +534,15 @@ void TickAll()
 	if (auto GS = Cast<AFortGameStateAthena>(World->GetGameState()))
 		bWarmup = (GS->GetGamePhase() == EAthenaGamePhase::Warmup);
 
+	{
+		static bool s_actOpen = false;
+		if (!bWarmup && !s_actOpen)
+		{
+			s_actOpen = true;
+			LOG_INFO(LogBots, "[ogfn] act-gate open: perception+motor live");
+		}
+	}
+
 	if (!bWarmup)
 	{
 		RefreshZone(Now);
@@ -726,7 +735,15 @@ void TickAll()
 			ApplyJump(Pawn);
 
 		if (Out.firing)
+		{
+			static bool s_firstFire = false;
+			if (!s_firstFire)
+			{
+				s_firstFire = true;
+				LOG_INFO(LogBots, "[ogfn] first fire event (motor trigger pulled)");
+			}
 			ApplyFire(Pawn);
+		}
 
 		// decision.build_wall intentionally unwired: builder.h is the next pass.
 	}
