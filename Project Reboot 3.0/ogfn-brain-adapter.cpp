@@ -120,7 +120,12 @@ namespace
 			return;
 		g_verbs.bResolved = true;
 
+		// SetActorRotation is plain native on this chain; the Blueprint-exposed
+		// UFUNCTION this build actually carries is K2_SetActorRotation (first live
+		// session showed rotate=0 with only the native name).
 		g_verbs.rotateFn = Pawn->FindFunction("SetActorRotation");
+		if (!g_verbs.rotateFn)
+			g_verbs.rotateFn = Pawn->FindFunction("K2_SetActorRotation");
 		g_verbs.jumpFn = Pawn->FindFunction("Jump");
 		g_verbs.moveFn = Pawn->FindFunction("AddMovementInput");
 		if (!g_verbs.moveFn)
