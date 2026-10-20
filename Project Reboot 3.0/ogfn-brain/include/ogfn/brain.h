@@ -60,6 +60,20 @@ struct WorldSnapshot {
   // Where the fight the bot is third-partying is happening (used by ThirdParty).
   float fight_x = 0.f, fight_y = 0.f;
 
+  // Consumables. Healing is a timed action in this game, not a click: the bot that
+  // decides "heal" is committed to a 2-3s animation it can be shot out of. Without
+  // this, Heal was a per-tick decision with no duration, so a bot "healed" instantly
+  // and could re-decide the next tick, which looks nothing like a player chugging a
+  // potion behind a wall.
+  int big_shields = 0;     // +50 each
+  int small_shields = 0;   // +25 each
+  int medkits = 0;         // +100 hp each
+  int bandages = 0;        // +15 hp each, capped
+  // Seconds left on a heal in progress, and which item it is consuming. The engine
+  // sets these while the animation runs; the brain must not start another action.
+  float heal_remaining_secs = 0.f;
+  int healing_item = 0;    // 0 none, 1 small shield, 2 big shield, 3 medkit, 4 bandage
+
   // Squad context. Empty (or all solo) means the old solo behaviour exactly, so a
   // solo lobby is unchanged and only real squads get squad decisions.
   std::vector<Teammate> teammates;
@@ -115,6 +129,13 @@ class Brain {
 
   const Persona& persona() const { return persona_; }
   const LootValuer& loot_valuer() const { return loot_; }
+  // True while a heal animation the brain committed to is still running. Exposed so
+  // the engine can hold the bot in it and the bench can measure heal uptime.
+  bool healing() const { return heal_left_ > 0.f; }
+  int heal_item() const { return heal_item_; }
+  // Seconds left on the committed heal, so the engine can animate and count against
+  // the same number the brain decided instead of inventing its own.
+  float heal_seconds_left() const { return heal_left_ > 0.f ? heal_left_ : 0.f; }
   const SquadBrain& squad() const { return squad_; }
   const SquadDirective& squad_directive() const { return squad_directive_; }
   // The view direction the movement layer asked for, if any. The engine blends the
@@ -167,6 +188,9 @@ class Brain {
   // of re-deriving one from a move_to that keeps moving.
   float last_look_yaw_ = 0.f;
   bool last_face_travel_ = false;
+  // Committed heal: which item, and how long is left.
+  float heal_left_ = 0.f;
+  int heal_item_ = 0;
 
   // Fixed per bot: which side of the ring it prefers to rotate in on. Derived once
   // from the seed so a bot's rotation line is a habit, not a per-tick coin flip.

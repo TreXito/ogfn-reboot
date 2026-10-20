@@ -61,7 +61,10 @@ void TestClearBuildLog();
 std::vector<std::pair<int, int>> TestBuildLog();
 // Behavior-sim hooks: loot telemetry (samples seen, classes seen, the live choice).
 void TestForceLoot();
+// Behavior-sim hook: put a consumable in a bot's inventory so the heal path can run.
+void TestGiveConsumable(size_t i, ogfn::ItemClass cls, int count);
 int TestSquadmateCount(size_t i);
+int TestHealEquips(size_t i);
 int TestLootSeen(size_t i);
 bool TestLootClassSeen(size_t i, ogfn::ItemClass cls);
 bool TestLootChoice(size_t i, int* pickupId, float* x, float* y);
@@ -107,6 +110,14 @@ namespace
 		// value, so the adapter has to remember it between ticks (it used to leave
 		// pitch at 0 forever, which is what made every bot stare at the horizon).
 		float pitch = 0.f;
+		// Heal in progress: which item, and how long the animation has left. The brain
+		// commits (Brain::healing) and the adapter equips the consumable once, then
+		// reports the remaining time back through the snapshot so the brain keeps the
+		// bot in the animation instead of re-deciding every tick.
+		float healRemaining = 0.f;
+		int healItem = 0;
+		bool healEquipped = false;
+		int healsUsed = 0;
 		// Previous target position, for velocity: without it a bot cannot lead, and a
 		// bot that hits where you WERE is the clearest aimbot signature there is.
 		ogfn::Vec3 last_target_pos{};
@@ -991,6 +1002,29 @@ namespace
 			W.teammates.push_back(T);
 		}
 		W.now_ms = (uint64_t)(Now * 1000.0);
+		// Heal progress back to the brain, and the consumable counts it decides on.
+		W.heal_remaining_secs = M.healRemaining;
+		if (auto* Inv = Controller->GetWorldInventory())
+		{
+			for (auto* Item : Inv->Items)
+			{
+				if (!Item || !Item->GetItemEntry())
+					continue;
+				auto* Def = Item->GetItemEntry()->GetItemDefinition();
+				if (!Def)
+					continue;
+				const ogfn::ItemClass Cls = ogfn::classify_item(Def->GetFullName());
+				const int Count = Item->GetItemEntry()->GetCount();
+				switch (Cls)
+				{
+					case ogfn::ItemClass::ShieldBig: W.big_shields += Count; break;
+					case ogfn::ItemClass::ShieldPotion: W.small_shields += Count; break;
+					case ogfn::ItemClass::Medkit: W.medkits += Count; break;
+					case ogfn::ItemClass::Bandage: W.bandages += Count; break;
+					default: break;
+				}
+			}
+		}
 		W.enemies_pushing_me = false;   // no damage events wired on this build yet
 
 		auto* Target = M.brain.perception().nearest(true);
@@ -2035,6 +2069,74 @@ void TickAll()
 		if (Move.jumping)
 			ApplyJump(Pawn);
 
+		// Healing. The brain commits to an item and a duration; this equips it once and
+		// counts down. Without this, Heal was a decision with no effect at all: bots
+		// decided to heal and nothing happened, which is worse than not deciding.
+		if (M.brain.healing()) {
+			// Count the animation down. The brain also keeps its own timer, but the
+			// engine's number is the one the client animates against, so this is what
+			// the snapshot reports and what the brain's engine-gate reads.
+			if (M.healEquipped && M.healRemaining > 0.f)
+				M.healRemaining = (std::max)(0.f, M.healRemaining - dt);
+			if (!M.healEquipped) {
+				M.healEquipped = true;
+				M.healItem = M.brain.heal_item();
+				// Seed the countdown from the brain's committed duration (item + jitter),
+				// so the two agree instead of drifting apart.
+				M.healRemaining = (std::max)(0.5f, M.brain.heal_seconds_left());
+				if (auto* Inv = Controller->GetWorldInventory())
+				{
+					// Equip the matching consumable so the client-side use animation runs.
+					// Which item is a brain decision; finding the stack is the engine's job.
+					UFortItem* Want = nullptr;
+					for (auto* Item : Inv->Items)
+					{
+						if (!Item || !Item->GetItemEntry())
+							continue;
+						auto* Def = Item->GetItemEntry()->GetItemDefinition();
+						if (!Def)
+							continue;
+						const ogfn::ItemClass Cls = ogfn::classify_item(Def->GetFullName());
+						const bool match =
+							(M.healItem == 1 && Cls == ogfn::ItemClass::ShieldPotion) ||
+							(M.healItem == 2 && Cls == ogfn::ItemClass::ShieldBig) ||
+							(M.healItem == 3 && Cls == ogfn::ItemClass::Medkit) ||
+							(M.healItem == 4 && Cls == ogfn::ItemClass::Bandage);
+						if (match) { Want = Item; break; }
+					}
+					if (Want)
+					{
+						AFortPlayerController::ServerExecuteInventoryItemHook(
+							Controller, Want->GetItemEntry()->GetItemGuid());
+						++M.healsUsed;
+						static bool s_healLogged = false;
+						if (!s_healLogged)
+						{
+							s_healLogged = true;
+							LOG_INFO(LogBots, "[ogfn] first heal: equipping item class {}",
+								M.healItem);
+						}
+					}
+					else
+					{
+						// Nothing matching in the bag: the brain's inventory read and the
+						// engine's disagree. Report once rather than looping.
+						static bool s_healMissLogged = false;
+						if (!s_healMissLogged)
+						{
+							s_healMissLogged = true;
+							LOG_ERROR(LogBots, "[ogfn] brain wanted heal item {} but no matching "
+							           "consumable is in the inventory", M.healItem);
+						}
+					}
+				}
+			}
+		} else {
+			M.healEquipped = false;
+			M.healRemaining = 0.f;
+			M.healItem = 0;
+		}
+
 		// Building. decision.build_wall used to be dropped on the floor ("builder.h
 		// is the next pass"), so no bot has ever placed a piece. The builder owns the
 		// sequence, cadence and edits; this only executes the input it returns.
@@ -2086,8 +2188,33 @@ void TestStrafeStats(size_t i, int* total, int* forward) {
 	}
 }
 
+int TestHealEquips(size_t i) {
+	return i < g_minds.size() ? g_minds[i].healsUsed : 0;
+}
+
 int TestSquadmateCount(size_t i) {
 	return i < g_minds.size() ? (int)g_minds[i].squadmates.size() : 0;
+}
+
+void TestGiveConsumable(size_t i, ogfn::ItemClass cls, int count) {
+	auto& Fleet = AllPlayerBotsToTick;
+	if (i >= Fleet.size() || !Fleet[i].Controller)
+		return;
+	auto* Controller = Cast<AFortPlayerControllerAthena>(Fleet[i].Controller);
+	if (!Controller)
+		return;
+	auto* Inv = Controller->GetWorldInventory();
+	if (!Inv)
+		return;
+	auto* Def = new UFortItemDefinition();
+	Def->name = (cls == ogfn::ItemClass::ShieldPotion) ? "Athena_Small_Shield_Potion"
+	          : (cls == ogfn::ItemClass::ShieldBig) ? "Athena_Shield_Potion"
+	          : (cls == ogfn::ItemClass::Medkit) ? "Athena_Medkit" : "Athena_Bandage";
+	auto* Item = new UFortItem();
+	Item->name = "Consumable";
+	Item->Entry.Definition = Def;
+	Item->Entry.Count = count;
+	Inv->Items.push_back(Item);
 }
 
 void TestForceLoot() {

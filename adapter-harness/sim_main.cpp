@@ -41,7 +41,8 @@ namespace OgfnBot { void TestClearBurstState(size_t i); void TestSetLadder(float
                   void TestStrafeStats(size_t i, int* total, int* forward);
                   void TestClearBuildLog(); std::vector<std::pair<int,int>> TestBuildLog();
                   void TestForceLoot(); int TestLootSeen(size_t); bool TestLootClassSeen(size_t, ItemClass);
-                  bool TestLootChoice(size_t, int*, float*, float*); int TestSquadmateCount(size_t); } // adapter (OGFN_HARNESS)
+                  bool TestLootChoice(size_t, int*, float*, float*); int TestSquadmateCount(size_t);
+                  int TestHealEquips(size_t); void TestGiveConsumable(size_t, ItemClass, int); } // adapter (OGFN_HARNESS)
 
 static int g_failures = 0;
 #define EXPECT(cond, msg) do { \
@@ -573,6 +574,25 @@ int main()
 		std::printf("  [P14] view within 45deg of travel on %d/%d samples (%.0f%%)\n",
 			aligned, total, 100.0 * aligned / total);
 		EXPECT(aligned * 2 > total, "with nothing in sight the bot faces where it walks");
+	}
+
+	// ---------- P15: healing equips a real consumable ----------
+	// Heal was a decision with no effect: bots decided to heal and nothing happened.
+	// Now the brain commits to an item and the adapter equips the matching stack.
+	std::printf("\n-- P15: heal equips the consumable the brain chose --\n");
+	{
+		world.ND->Connections.v.clear();
+		EnemyPawn->bDestroyed = true;
+		Harness::g_wallUp = false;
+		OgfnBot::TestSetLadder(90000.f, 45000.f, 30000.f);
+		P0->Location = FVector(90400.f, 45000.f, 100.f);
+		P0->Shield = 0.f;      // shields down, so the heal is unambiguous
+		P0->Health = 100.f;
+		OgfnBot::TestGiveConsumable(0, ogfn::ItemClass::ShieldPotion, 3);
+		TickFor(2.0);
+		std::printf("  [P15] equips issued for heals: %d\n", OgfnBot::TestHealEquips(0));
+		EXPECT(OgfnBot::TestHealEquips(0) > 0,
+		       "a healing bot equips a real consumable (heal is not a no-op)");
 	}
 
 	// ---------- summary ----------

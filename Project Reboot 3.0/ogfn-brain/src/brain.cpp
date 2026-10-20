@@ -102,10 +102,18 @@ float Brain::score(ActionKind k, const WorldSnapshot& w) const {
     }
 
     case ActionKind::Heal: {
-      if (w.self_shield >= 100.f || w.shield_potions <= 0) return 0.f;
+      // Anything usable? Shields first, exactly as the item choice does, or the bot
+      // scores a heal it cannot perform.
+      const bool can_shield = (w.small_shields > 0 || w.big_shields > 0) && w.self_shield < 100.f;
+      const bool can_hp = (w.medkits > 0 || w.bandages > 0) && w.self_health < 100.f;
+      if (!can_shield && !can_hp) return 0.f;
+      // ...and never while already healing.
+      if (heal_left_ > 0.f || w.heal_remaining_secs > 0.f) return 0.f;
       if (engaged && w.target_distance < 45.f) return 0.05f;  // not mid-fight
       float s = 0.40f * (0.5f + p.caution);
+      // Health is more urgent than shields: a player at 20hp heals out of fear.
       s *= lerpf(1.5f, 0.4f, hp);
+      if (can_hp && w.self_health < 50.f) s *= 1.6f;
       return s;
     }
 
@@ -185,7 +193,9 @@ Decision Brain::make_intent(ActionKind a, const WorldSnapshot& w) {
       break;
     }
     case ActionKind::Heal:
-      d.build_wall = true;  // heal behind cover
+      d.build_wall = true;   // heal behind cover
+      d.move_to = w.self_pos; // potions do not walk
+      d.look_yaw_deg = w.self_yaw_deg;
       break;
     case ActionKind::Loot: {
       // Loot used to fall through to `default`, so it returned an all-default
@@ -243,6 +253,47 @@ Decision Brain::make_intent(ActionKind a, const WorldSnapshot& w) {
 
 Decision Brain::think(const WorldSnapshot& w) {
   const bool combat_now = in_combat(w);
+
+  // --- committed heal -----------------------------------------------------------
+  // Healing is a timed animation in this game (2s to 5s depending on the item), and a
+  // player is locked into it: you get shot out of a potion, you do not cancel it to
+  // start firing in the same frame. The old model decided Heal per tick with no
+  // duration, so a bot "healed" instantly and re-decided the next tick. Now the
+  // decision commits to an item and a duration, and nothing else happens until it
+  // finishes or is interrupted by taking damage at close range.
+  const float dt_guess = 0.016f;   // think() has no dt; the engine calls at tick rate
+  if (heal_left_ > 0.f) {
+    heal_left_ -= dt_guess;
+    // Interrupted: shot at close range while healing. A player drops the heal to
+    // fight; they do not stand in the open finishing a bandage.
+    if (heal_left_ > 0.f && combat_now && w.target_distance < 25.f) {
+      heal_left_ = 0.f;
+      heal_item_ = 0;
+    } else if (heal_left_ > 0.f) {
+      Decision d;
+      d.action = ActionKind::Heal;
+      d.reason = "healing";
+      d.build_wall = true;          // potions behind cover, as people do
+      d.move_to = w.self_pos;       // standing still: healing does not walk
+      d.look_yaw_deg = w.self_yaw_deg;
+      if (last_face_travel_) {
+        d.look_yaw_deg = last_look_yaw_;
+        d.face_travel = true;
+      }
+      return d;
+    }
+  }
+  // Engine-reported heal in progress (the adapter knows the real animation length):
+  // do not start anything new while it runs.
+  if (w.heal_remaining_secs > 0.f) {
+    Decision d;
+    d.action = ActionKind::Heal;
+    d.reason = "healing";
+    d.build_wall = true;
+    d.move_to = w.self_pos;
+    d.look_yaw_deg = w.self_yaw_deg;
+    return d;
+  }
 
   // Squad pass first: it shapes which target to fight and whether a revive outranks
   // everything else. With no teammates in the snapshot this is a no-op, so solo
@@ -378,6 +429,28 @@ Decision Brain::think(const WorldSnapshot& w) {
   }
 
   Decision planned = make_intent(best.action, w);
+  // Committing to a heal means choosing WHICH consumable and for how long. A player
+  // tops off shields with the cheap one, saves the big pot for a real hole, and
+  // uses a medkit only when health is actually missing.
+  if (best.action == ActionKind::Heal && heal_left_ <= 0.f) {
+    const bool need_hp = w.self_health < 75.f;
+    const bool need_shield = w.self_shield < 100.f;
+    if (need_shield && w.small_shields > 0) {
+      heal_item_ = 1;
+      heal_left_ = 2.0f;
+    } else if (need_shield && w.big_shields > 0) {
+      heal_item_ = 2;
+      heal_left_ = 4.0f;
+    } else if (need_hp && w.medkits > 0) {
+      heal_item_ = 3;
+      heal_left_ = 5.0f;
+    } else if (need_hp && w.bandages > 0) {
+      heal_item_ = 4;
+      heal_left_ = 2.5f;
+    }
+    // Variance, because nobody's potion takes exactly 2.000 seconds.
+    if (heal_left_ > 0.f) heal_left_ *= rng_.range(0.92f, 1.12f);
+  }
   last_look_yaw_ = planned.look_yaw_deg;
   last_face_travel_ = planned.face_travel;
   planned.score = best.score;
