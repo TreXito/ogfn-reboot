@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 
+#include "loot.h"
 #include "mathx.h"
 #include "perception.h"
 #include "persona.h"
@@ -44,6 +45,16 @@ struct WorldSnapshot {
   float target_distance = 0.f;
   float target_health = 100.f;
   bool target_is_reloading = true;
+
+  // Loot, as objects rather than a count. `loot_within_30m` is still here because
+  // the score reads it as "is there anything here at all", but the DECISION uses
+  // the samples: which pickup, and is it worth crossing the ground for. A count
+  // cannot tell a big pot from an ammo box, and that difference is the whole of
+  // loot decision making.
+  std::vector<LootSample> loot;
+  Inventory inventory;
+  // Where the fight the bot is third-partying is happening (used by ThirdParty).
+  float fight_x = 0.f, fight_y = 0.f;
 };
 
 struct Decision {
@@ -71,13 +82,19 @@ struct Decision {
 // only scores that shift as the world does.
 class Brain {
  public:
-  Brain(Persona p, uint64_t seed) : persona_(p), rng_(seed) {
+  Brain(Persona p, uint64_t seed) : persona_(p), rng_(seed), loot_(p, seed ^ 0x10077ull) {
     // Re-plan cadence: impatient bots re-evaluate quicker, patient ones settle.
     plan_fast_secs_ = lerpf(0.09f, 0.06f, p.patience);
     plan_slow_secs_ = lerpf(0.24f, 0.12f, p.patience);
   }
 
   const Persona& persona() const { return persona_; }
+  const LootValuer& loot_valuer() const { return loot_; }
+
+  // What the bot decided to walk to. Persists across committed ticks (the valuation
+  // only re-runs on a plan beat), and is empty when the last Loot plan found
+  // nothing worth the walk.
+  const LootChoice& loot_choice() const { return loot_choice_; }
   Perception& perception() { return perception_; }
   const Perception& perception() const { return perception_; }
   void set_perception_config(PerceptionConfig cfg) { perception_ = Perception(cfg); }
@@ -106,11 +123,13 @@ class Brain {
 
  private:
   float score(ActionKind k, const WorldSnapshot& w) const;
-  Decision make_intent(ActionKind a, const WorldSnapshot& w) const;
+  Decision make_intent(ActionKind a, const WorldSnapshot& w);
 
   Persona persona_;
   Rng rng_;
   Perception perception_;
+  LootValuer loot_;
+  LootChoice loot_choice_;
 
   float plan_fast_secs_ = 0.08f;
   float plan_slow_secs_ = 0.20f;

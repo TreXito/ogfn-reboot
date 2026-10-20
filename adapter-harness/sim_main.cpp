@@ -18,6 +18,7 @@
 #include "stubs/KismetSystemLibrary.h"
 // Brain types for the assertions (placing pieces, reporting goals).
 #include "ogfn/ogfn_bots.h"
+#include "stubs/FortPickup.h"
 using namespace ogfn;
 
 #include <cstdio>
@@ -37,7 +38,9 @@ namespace OgfnLocker { void AutoApplyOnce() {} }
 
 namespace OgfnBot { void TestClearBurstState(size_t i); void TestSetLadder(float, float, float);
                   void TestStrafeStats(size_t i, int* total, int* forward);
-                  void TestClearBuildLog(); std::vector<std::pair<int,int>> TestBuildLog(); } // adapter (OGFN_HARNESS)
+                  void TestClearBuildLog(); std::vector<std::pair<int,int>> TestBuildLog();
+                  void TestForceLoot(); int TestLootSeen(size_t); bool TestLootClassSeen(size_t, ItemClass);
+                  bool TestLootChoice(size_t, int*, float*, float*); } // adapter (OGFN_HARNESS)
 
 static int g_failures = 0;
 #define EXPECT(cond, msg) do { \
@@ -410,6 +413,64 @@ int main()
 		EXPECT(walls > 0, "and the pieces are walls, not something arbitrary");
 		EXPECT(floors > 0, "the box gets a roof");
 		EXPECT(edits > 0, "the box gets a window edit, so the bot can shoot out of it");
+	}
+
+	// ---------- P11: loot is objects, not a count ----------
+	// The adapter used to feed the brain only loot_within_30m (an int), so the
+	// valuator had nothing to rank and a Loot decision had no destination at all
+	// (Loot had no case in make_intent). Spawn real pickups near bot0 and check
+	// that the brain sees CLASSES, reads a real inventory, and walks somewhere.
+	std::printf("\n-- P11: loot samples + inventory reach the brain --\n");
+	{
+		world.ND->Connections.v.clear();
+		EnemyPawn->bDestroyed = true;      // no fight: pure loot case
+		Harness::g_wallUp = false;
+		P0->Health = 100.f;
+		P0->Shield = 0.f;                  // shields down: a big pot is the best thing
+		// P8 left a 625uu final ring, so every bot is always within 20m of the edge
+		// and rotation legitimately outscores looting (RotateToCircle is 0.02 only
+		// when edge <= -20m). Widen the ladder for this scenario: a real early-game
+		// ring is kilometres across and looting is what people actually do.
+		OgfnBot::TestSetLadder(90000.f, 45000.f, 30000.f);   // 300 m radius
+		P0->Location = FVector(90400.f, 45000.f, 100.f);
+
+		// Two pickups: junk under the bot's feet, a big pot 8 m away.
+		auto* PickupClass = new UClass();
+		PickupClass->name = "/Script/FortniteGame.FortPickup";
+		Harness::g_namedClasses[L"/Script/FortniteGame.FortPickup"] = PickupClass;
+
+		auto MakePickup = [&](const char* defName, float x, float y) {
+			auto* Def = new UFortItemDefinition();
+			Def->name = defName;
+			auto* P = new AFortPickup();
+			P->name = "Pickup";
+			P->Location = P0->Location + FVector(x, y, 0.f);
+			auto* E = new FFortItemEntry();
+			E->Definition = Def;
+			E->Count = 1;
+			P->Entry = E;
+			Harness::g_classObjects[PickupClass].push_back(P);
+			return P;
+		};
+		MakePickup("Ammo_Medium", 100.f, 0.f);                                  // 1 m: junk
+		MakePickup("Athena_Shield_Potion", 800.f, 0.f);                         // 8 m: big pot
+
+		OgfnBot::TestForceLoot();
+		TickFor(1.0);   // loot refresh is 2 Hz, plus a plan beat
+		TickFor(1.0);
+
+		int seen = OgfnBot::TestLootSeen(0);
+		std::printf("  [P11] loot samples seen by brain: %d\n", seen);
+		EXPECT(seen >= 2, "the brain receives loot SAMPLES, not just a count");
+		EXPECT(OgfnBot::TestLootClassSeen(0, ItemClass::ShieldBig),
+		       "and they carry their class (big shield recognised)");
+
+		int pickId = 0;
+		float px = 0.f, py = 0.f;
+		const bool want = OgfnBot::TestLootChoice(0, &pickId, &px, &py);
+		std::printf("  [P11] loot choice: want=%d at (%.0f,%.0f)\n", (int)want, px, py);
+		EXPECT(want, "with shields down and a big pot nearby, the bot wants it");
+		EXPECT(px != 0.f || py != 0.f, "and the destination is a real position, not the origin");
 	}
 
 	// ---------- summary ----------

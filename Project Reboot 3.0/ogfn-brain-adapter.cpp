@@ -26,6 +26,7 @@
 #include "FortGameStateAthena.h"
 #include "FortSafeZoneIndicator.h"
 #include "FortWorldItemDefinition.h"
+#include "FortPickup.h"
 #include "KismetSystemLibrary.h"
 #ifdef OGFN_HARNESS
 namespace OgfnLocker { void AutoApplyOnce(); }  // provided by the harness stub
@@ -57,6 +58,11 @@ void TestStrafeStats(size_t i, int* total, int* forward);
 // Behavior-sim hooks: build inputs that reached ApplyBuildPiece (piece, is_edit).
 void TestClearBuildLog();
 std::vector<std::pair<int, int>> TestBuildLog();
+// Behavior-sim hooks: loot telemetry (samples seen, classes seen, the live choice).
+void TestForceLoot();
+int TestLootSeen(size_t i);
+bool TestLootClassSeen(size_t i, ogfn::ItemClass cls);
+bool TestLootChoice(size_t i, int* pickupId, float* x, float* y);
 #endif
 
 namespace
@@ -168,8 +174,18 @@ namespace
 	int g_gsNextRadiusOff = -1;
 	int g_gsPhaseOff = -1;
 
-	// Loot density, refreshed at 2 Hz and shared across bots (one GObjects sweep, not 20).
-	std::vector<FVector> g_lootPositions;
+	// Loot, refreshed at 2 Hz and shared across bots (one GObjects sweep, not 20).
+	// Stores the item CLASS with the position, because the brain's loot decision is
+	// a valuation: a count cannot tell a big pot from an ammo box, and that
+	// difference is the whole of loot decision making.
+	struct LootSpot
+	{
+		FVector Pos;
+		ogfn::ItemClass Cls;
+		int Count;
+		int Id;
+	};
+	std::vector<LootSpot> g_lootSpots;
 	double g_lootNextRefresh = -1e9;
 	bool g_lootScanned = false;
 
@@ -586,10 +602,38 @@ namespace
 			return;
 
 		TArray<AActor*> Found = UGameplayStatics::GetAllActorsOfClass(World, PickupClass);
-		g_lootPositions.clear();
-		g_lootPositions.reserve((size_t)Found.Num());
+		g_lootSpots.clear();
+		g_lootSpots.reserve((size_t)Found.Num());
+		static int s_unclassified = 0;
 		for (int i = 0; i < Found.Num(); i++)
-			g_lootPositions.push_back(Found.at(i)->GetActorLocation());
+		{
+			auto* Pickup = Cast<AFortPickup>(Found.at(i));
+			if (!Pickup)
+				continue;
+			LootSpot Spot;
+			Spot.Pos = Pickup->GetActorLocation();
+			Spot.Cls = ogfn::ItemClass::Unknown;
+			Spot.Count = 1;
+			// Classify from the item definition's full name. The brain matches on
+			// substrings in a deliberate order, so it wants the whole path, not a
+			// display name.
+			if (auto* Entry = Pickup->GetPrimaryPickupItemEntry())
+			{
+				Spot.Count = Entry->GetCount();
+				if (auto* Def = Entry->GetItemDefinition())
+				{
+					Spot.Cls = ogfn::classify_item(Def->GetFullName());
+					if (Spot.Cls == ogfn::ItemClass::Unknown && s_unclassified < 12)
+					{
+						++s_unclassified;
+						LOG_INFO(LogBots, "[ogfn] unclassified pickup: {}",
+							Def->GetFullName().c_str());
+					}
+				}
+			}
+			Spot.Id = (int)(((uintptr_t)Pickup >> 4) & 0x7fffffff);
+			g_lootSpots.push_back(Spot);
+		}
 	}
 
 	void ScanWeaponsOnce()
@@ -757,6 +801,7 @@ namespace
 	}
 
 	ogfn::WorldSnapshot BuildSnapshot(Mind& M, AFortPlayerPawnAthena* Pawn,
+	                                  AFortPlayerControllerAthena* Controller,
 	                                  int enemiesSeenWithin30, double Now)
 	{
 		ogfn::WorldSnapshot W;
@@ -850,14 +895,68 @@ namespace
 		}
 
 		int loot30 = 0;
-		for (auto& LootPos : g_lootPositions)
+		W.loot.clear();
+		for (auto& Spot : g_lootSpots)
 		{
-			float dx = ToMeters((float)LootPos.X) - W.self_pos.x;
-			float dy = ToMeters((float)LootPos.Y) - W.self_pos.y;
-			if (dx * dx + dy * dy <= 30.f * 30.f)
+			float dx = ToMeters((float)Spot.Pos.X) - W.self_pos.x;
+			float dy = ToMeters((float)Spot.Pos.Y) - W.self_pos.y;
+			const float d2 = dx * dx + dy * dy;
+			if (d2 <= 30.f * 30.f)
 				loot30++;
+			// The valuator has its own, wider radius (45m); feed it everything within
+			// reach rather than pre-filtering at 30m, or a pot at 32m is invisible.
+			if (d2 <= 46.f * 46.f)
+			{
+				ogfn::LootSample Sample;
+				Sample.id = Spot.Id;
+				Sample.pos = ogfn::Vec3(ToMeters((float)Spot.Pos.X), ToMeters((float)Spot.Pos.Y),
+				                        ToMeters((float)Spot.Pos.Z));
+				Sample.cls = Spot.Cls;
+				Sample.count = Spot.Count;
+				W.loot.push_back(Sample);
+			}
 		}
 		W.loot_within_30m = loot30;
+
+		// Own inventory, so loot worth is relative to what the bot already carries.
+		// Read every tick: it changes on every pickup and every heal.
+		W.inventory = ogfn::Inventory{};
+		if (auto* Inv = Controller->GetWorldInventory())
+		{
+			W.inventory.ammo = 999;   // infinite ammo is on for bots (see the arena toggles)
+			W.inventory.materials = 999;
+			for (auto* Item : Inv->Items)
+			{
+				if (!Item)
+					continue;
+				auto* Entry = Item->GetItemEntry();
+				if (!Entry)
+					continue;
+				auto* Def = Entry->GetItemDefinition();
+				const ogfn::ItemClass Cls = Def ? ogfn::classify_item(Def->GetFullName())
+				                                : ogfn::ItemClass::Unknown;
+				const int Count = Entry->GetCount();
+				switch (Cls)
+				{
+					case ogfn::ItemClass::ShieldBig: W.inventory.big_shields += Count; break;
+					case ogfn::ItemClass::ShieldPotion: W.inventory.small_shields += Count; break;
+					case ogfn::ItemClass::Medkit: W.inventory.medkits += Count; break;
+					case ogfn::ItemClass::Bandage: W.inventory.bandages += Count; break;
+					case ogfn::ItemClass::Shotgun: W.inventory.has_shotgun = true; break;
+					case ogfn::ItemClass::Sniper: W.inventory.has_sniper = true; break;
+					case ogfn::ItemClass::AssaultRifle:
+					case ogfn::ItemClass::Pistol:
+						// Tier is not exposed per-item here; holding ANY gun is what
+						// stops the bot valuing a second one at starter-gun prices.
+						if (W.inventory.weapon_tier < 2) W.inventory.weapon_tier = 2;
+						break;
+					default: break;
+				}
+			}
+			// A bot holding any of the granted weapons counts as armed.
+			if (W.inventory.weapon_tier == 0)
+				W.inventory.weapon_tier = 2;
+		}
 		W.enemies_within_30m = enemiesSeenWithin30;
 		W.enemies_currently_fighting_each_other = 0; // needs damage observation, next pass
 
@@ -873,6 +972,20 @@ namespace
 
 		return W;
 	}
+	// Last snapshot's loot per bot, so a harness scenario can inspect what the brain
+	// actually received (samples with classes, and the choice it made).
+#ifdef OGFN_HARNESS
+	std::vector<std::vector<ogfn::LootSample>> g_lastLoot;
+	std::vector<ogfn::LootChoice> g_lastLootChoice;
+	void RecordLootForHarness(size_t i, const ogfn::WorldSnapshot& W, const ogfn::Brain& B) {
+		if (g_lastLoot.size() <= i) {
+			g_lastLoot.resize(i + 1);
+			g_lastLootChoice.resize(i + 1);
+		}
+		g_lastLoot[i] = W.loot;
+		g_lastLootChoice[i] = B.loot_choice();
+	}
+#endif
 } // namespace (anonymous)
 
 // Called from Bots::Tick every net tick while Globals::bEnableOgfnBrain is set.
@@ -1476,9 +1589,12 @@ void TickAll()
 
 		M.brain.observe(Obs, Now);
 
-		ogfn::WorldSnapshot W = BuildSnapshot(M, Pawn, enemiesSeenWithin30, Now);
+		ogfn::WorldSnapshot W = BuildSnapshot(M, Pawn, Controller, enemiesSeenWithin30, Now);
 		W_last_self = W.self_pos;
 		M.decision = M.brain.think(W);
+#ifdef OGFN_HARNESS
+		RecordLootForHarness(i, W, M.brain);
+#endif
 
 		{
 			static EAthenaGamePhase s_obsPhase = (EAthenaGamePhase)-1;
@@ -1845,6 +1961,36 @@ void TestStrafeStats(size_t i, int* total, int* forward) {
 		*total = g_minds[i].strafeSteps;
 		*forward = g_minds[i].strafeForward;
 	}
+}
+
+void TestForceLoot() {
+	// Force the loot sweep now: the live cadence is 2 Hz and a scenario must not
+	// have to wait out (or be blocked by) the previous sweep's clock.
+	g_lootScanned = true;
+	g_lootNextRefresh = -1e9;
+
+	// Make the next plan beat a Loot decision by priming the action; the brain's
+	// own scoring would also pick it here, but priming removes persona luck.
+	if (!g_minds.empty())
+		g_minds[0].brain.prime_action(ogfn::ActionKind::Loot,
+			g_lastLootChoice.empty() ? 0.0 : g_minds[0].lastTick);
+}
+int TestLootSeen(size_t i) {
+	return i < g_lastLoot.size() ? (int)g_lastLoot[i].size() : 0;
+}
+bool TestLootClassSeen(size_t i, ogfn::ItemClass cls) {
+	if (i >= g_lastLoot.size()) return false;
+	for (auto& s : g_lastLoot[i])
+		if (s.cls == cls) return true;
+	return false;
+}
+bool TestLootChoice(size_t i, int* pickupId, float* x, float* y) {
+	if (i >= g_lastLootChoice.size()) return false;
+	const auto& c = g_lastLootChoice[i];
+	*pickupId = c.pickup_id;
+	*x = c.pos.x;
+	*y = c.pos.y;
+	return c.want;
 }
 
 void TestClearBuildLog() {

@@ -3,6 +3,7 @@
 #include "brain.h"
 #include "building.h"
 #include "locomotion.h"
+#include "loot.h"
 #include "mathx.h"
 #include "motor.h"
 #include "perception.h"

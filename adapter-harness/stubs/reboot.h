@@ -226,7 +226,16 @@ struct AFortPlayerPawnAthena : AFortPawn, ProcessEventRecorder
 	}
 };
 
-struct FFortItemEntry { FGuid Guid; FGuid& GetItemGuid() { return Guid; } };
+struct UFortItemDefinition;
+struct FFortItemEntry
+{
+	FGuid Guid;
+	UFortItemDefinition* Definition = nullptr;
+	int Count = 1;
+	FGuid& GetItemGuid() { return Guid; }
+	UFortItemDefinition*& GetItemDefinition() { return Definition; }
+	int& GetCount() { return Count; }
+};
 struct UFortItem : UObject { FFortItemEntry Entry; FFortItemEntry* GetItemEntry() { return &Entry; } };
 
 struct AFortInventory : UObject
@@ -361,4 +370,8 @@ struct UGameplayStatics
 	static double GetTimeSeconds(UWorld*) { return Harness::g_now; }
 };
 
-struct UFortItemDefinition : UObject {};
+struct UFortItemDefinition : UObject
+{
+	// The real Object.h resolves this through a name index; the sim just uses name.
+	std::string GetFullName() const { return name; }
+};

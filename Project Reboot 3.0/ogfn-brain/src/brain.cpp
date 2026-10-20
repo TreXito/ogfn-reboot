@@ -52,9 +52,14 @@ float Brain::score(ActionKind k, const WorldSnapshot& w) const {
       return 0.05f;
 
     case ActionKind::Loot: {
+      // The score must agree with the valuation, or the brain picks Loot on a
+      // COUNT and then make_intent finds nothing worth the walk and sends the bot
+      // to the circle instead: "decided to loot" with no looting in it.
       if (w.loot_within_30m <= 0) return 0.f;
-      float s = 0.30f * (0.4f + p.greed) *
-                clampf(static_cast<float>(w.loot_within_30m) / 3.f, 0.f, 1.f);
+      const LootChoice c = loot_.choose(w.loot, w.inventory, w.self_pos,
+                                        w.circle_shrink_in_secs, engaged);
+      if (!c.want) return 0.f;
+      float s = 0.30f * (0.4f + p.greed) * clampf(c.worth * 2.2f, 0.f, 1.f);
       s *= 1.f - clampf(zp * 0.9f, 0.f, 0.95f);
       s *= 1.f - clampf((1.f - hp) * 0.5f, 0.f, 0.5f);
       if (engaged) s *= 0.15f;
@@ -128,9 +133,13 @@ float Brain::score(ActionKind k, const WorldSnapshot& w) const {
   return 0.f;
 }
 
-Decision Brain::make_intent(ActionKind a, const WorldSnapshot& w) const {
+Decision Brain::make_intent(ActionKind a, const WorldSnapshot& w) {
   Decision d;
   d.action = a;
+  // NOTE: loot_choice_ is NOT cleared here. A committed tick re-runs make_intent every
+  // frame and does not re-run the valuation (the plan beat did), so clearing would
+  // erase the live choice one tick after it was made and every consumer would see
+  // "no choice" while the bot is visibly walking to the pot.
   switch (a) {
     case ActionKind::Engage:
       d.move_to = Vec3(w.circle_center_x, w.circle_center_y, 0.f);
@@ -147,7 +156,36 @@ Decision Brain::make_intent(ActionKind a, const WorldSnapshot& w) const {
     case ActionKind::Heal:
       d.build_wall = true;  // heal behind cover
       break;
-    default:
+    case ActionKind::Loot: {
+      // Loot used to fall through to `default`, so it returned an all-default
+      // Decision: move_to (0,0,0). The adapter only moves for Rotate/Engage/Flee,
+      // so a bot that decided to loot stood still and did nothing, which read as
+      // an idle bot rather than a loot bug.
+      const float closing = w.circle_shrink_in_secs;
+      loot_choice_ = loot_.choose(w.loot, w.inventory, w.self_pos, closing,
+                                  in_combat(w));
+      if (loot_choice_.want) {
+        d.move_to = loot_choice_.pos;
+      } else {
+        // Nothing worth walking to: the honest human response is to keep moving
+        // with the zone, not to stand in a field.
+        d.move_to = Vec3(w.circle_next_center_x, w.circle_next_center_y, 0.f);
+      }
+      break;
+    }
+    case ActionKind::ThirdParty: {
+      // Third-partying means going to the fight, not to the circle. It used to
+      // fall through to `default` as well, so this action did nothing at all.
+      d.move_to = Vec3(w.fight_x, w.fight_y, 0.f);
+      break;
+    }
+    case ActionKind::HoldAngle:
+      // Holding an angle means holding position: no destination by design, which
+      // is exactly what move_to (0,0,0) would otherwise mean by accident.
+      d.move_to = w.self_pos;
+      break;
+    case ActionKind::Idle:
+      d.move_to = w.self_pos;
       break;
   }
   return d;

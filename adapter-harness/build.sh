@@ -10,6 +10,6 @@ cp "$ADAPTER" ./adapter-under-test.cpp
 g++ -std=c++20 -DOGFN_SIM_TRACE -DOGFN_HARNESS -Wall -Wextra -Wno-unused-parameter -g \
   -I. -Istubs -I"$BRAIN/include" \
   adapter-under-test.cpp "$BRAIN/src/brain.cpp" "$BRAIN/src/motor.cpp" \
-  "$BRAIN/src/perception.cpp" "$BRAIN/src/persona.cpp" "$BRAIN/src/locomotion.cpp" "$BRAIN/src/building.cpp" sim_main.cpp \
+  "$BRAIN/src/perception.cpp" "$BRAIN/src/persona.cpp" "$BRAIN/src/locomotion.cpp" "$BRAIN/src/building.cpp" "$BRAIN/src/loot.cpp" sim_main.cpp \
   -o ./sim
 ./sim
