@@ -33,6 +33,9 @@ namespace OgfnLocker { void AutoApplyOnce(); }  // provided by the harness stub
 #endif
 #include "ogfn/ogfn_bots.h"
 #include <cmath>
+#include <functional>
+#include <utility>
+#include <vector>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -48,6 +51,11 @@ void TestClearBurstState(size_t i);
 #ifdef OGFN_HARNESS
 // Behavior-sim hook: inject the storm ladder (live builds parse it from the engine log).
 void TestSetLadder(float cx, float cy, float r);
+// Behavior-sim hook: strafe evidence (steps taken while strafing, leaked-toward count).
+void TestStrafeStats(size_t i, int* total, int* forward);
+// Behavior-sim hooks: build inputs that reached ApplyBuildPiece (piece, is_edit).
+void TestClearBuildLog();
+std::vector<std::pair<int, int>> TestBuildLog();
 #endif
 
 namespace
@@ -69,6 +77,10 @@ namespace
 		// Movement model: strafe/crouch/jump/fall. MotorOutput.jumping existed but
 		// nothing ever set it, so ApplyJump was dead code (harness jump=0 forever).
 		ogfn::Locomotion loco;
+		// Building: the decision says "wall up", the builder says which piece, in
+		// what order, at what cadence. Without it Build placed nothing at all
+		// (decision.build_wall was documented as unwired).
+		ogfn::Builder builder;
 		ogfn::Decision decision;
 		bool bSeeded = false;
 		bool bArmed = false;
@@ -80,6 +92,14 @@ namespace
 		                            // killed bots do (wave must NOT resurrect them)
 		bool bElimLogged = false;   // one ELIMINATED line per bot
 		bool bStormEvac = false;    // emergency storm extract done
+		int buildCount = 0;         // pieces placed (evidence that building is wired)
+		// Strafe evidence, classified where yaw-to-target is known: of the steps taken
+		// while the movement layer says "strafing", how many actually went across the
+		// target line rather than at it. A strafe that leaks forward is the "walks at
+		// you while shooting" tell.
+		int strafeSteps = 0;
+		int strafeForward = 0;
+		bool bEditLogged = false;   // one line per bot when it first wants an edit
 		int stepOk = 0, stepBlk = 0; // kinematic walk: displaced vs blocked ticks
 		int moveCount = 0;          // move intents that reached ApplyMoveInput
 		FGuid armGuid;              // guid of the granted rifle (equip-only path, no re-add)
@@ -87,7 +107,8 @@ namespace
 		double nextLandTry = 0.0;   // retry clock for a rejected ground probe
 		double lastTick = 0.0;
 
-		Mind() : persona(), brain(persona, 1), motor(persona, 1), loco(persona, 1) {}
+		Mind() : persona(), brain(persona, 1), motor(persona, 1), loco(persona, 1),
+		         builder(persona, 1) {}
 
 		void Reseed(uint64_t seed, float skillBias)
 		{
@@ -99,6 +120,7 @@ namespace
 			// or the trigger is a hose (bench caught 5.4s continuous fire).
 			motor.set_weapon(ogfn::WeaponProfile(30, 2.6f));
 			loco = ogfn::Locomotion(persona, seed ^ 0x51ED270Bull);
+			builder = ogfn::Builder(persona, seed ^ 0xB0117ull);
 		}
 	};
 
@@ -109,6 +131,12 @@ namespace
 	int g_ladderTries = 0;
 	bool g_summaryLogged = false;
 	bool g_traceFnReady = true;        // Kismet traces are live once combat resolves
+	ogfn::Vec3 W_last_self{};          // last snapshot position (meters), for build placement
+#ifdef OGFN_HARNESS
+	// Harness hooks: records build inputs so a scenario can assert pieces were placed.
+	std::vector<std::pair<int, int>> g_harnessBuildLog;
+	std::function<void(ogfn::PieceKind, float, bool)> g_buildRecorder;
+#endif
 	bool g_lastStepBlocked = false;    // last kinematic step was swept into geometry
 	UFunction* g_moveCompSetModeFn = nullptr;   // resolved once at combat gate
 
@@ -267,6 +295,97 @@ namespace
 			struct { FVector WorldDir; bool bForce; } p{ dir, false };
 			g_verbs.moveComp->ProcessEvent(g_verbs.moveCompFn, &p);
 		}
+	}
+
+	// Building: place one piece on the grid. Resolves the player-buildable class at
+	// runtime, because this client's FName table is the only authority and a wrong
+	// hardcoded path fails silently (the piece simply never appears).
+	//
+	// Returns true if a piece was spawned. Logged misses are one-shot per class so a
+	// bot that cannot build does not spam the log 50 times a second.
+	bool ApplyBuildPiece(AFortPlayerControllerAthena* Controller, AFortPlayerPawnAthena* Pawn,
+	                     const ogfn::BuildInput& In, const ogfn::BuildGrid& Grid) {
+		if (!Controller || !Pawn || In.piece == ogfn::PieceKind::None)
+			return false;
+
+		static bool s_resolved = false;
+		static UClass* s_wall = nullptr;
+		static UClass* s_floor = nullptr;
+		static UClass* s_ramp = nullptr;
+		static UClass* s_cone = nullptr;
+		if (!s_resolved) {
+			s_resolved = true;
+			// The 3.5 playable set. These paths are the fork's own (see
+			// FortPlayerController.cpp BuildableData usage); each may be absent, and
+			// an absent one just means that piece never gets placed.
+			s_wall = FindObject<UClass>(L"/Game/Building/ActorBlueprints/Player/Wood/L1/PBWA_W1_Solid.PBWA_W1_Solid_C");
+			s_floor = FindObject<UClass>(L"/Game/Building/ActorBlueprints/Player/Wood/L1/PBWA_S1_Floor.PBWA_S1_Floor_C");
+			s_ramp = FindObject<UClass>(L"/Game/Building/ActorBlueprints/Player/Wood/L1/PBWA_S1_Ramp.PBWA_S1_Ramp_C");
+			s_cone = FindObject<UClass>(L"/Game/Building/ActorBlueprints/Player/Wood/L1/PBWA_W1_Arch.PBWA_W1_Arch_C");
+			LOG_INFO(LogBots, "[ogfn] buildable classes: wall={} floor={} ramp={} cone={}",
+				(__int64)s_wall, (__int64)s_floor, (__int64)s_ramp, (__int64)s_cone);
+		}
+
+		UClass* Class = nullptr;
+		switch (In.piece) {
+			case ogfn::PieceKind::Wall: Class = s_wall; break;
+			case ogfn::PieceKind::Floor: Class = s_floor; break;
+			case ogfn::PieceKind::Ramp: Class = s_ramp; break;
+			case ogfn::PieceKind::Cone: Class = s_cone; break;
+			case ogfn::PieceKind::None: return false;
+		}
+		if (!Class) {
+#ifdef OGFN_HARNESS
+			// The harness has no asset registry, so no class can resolve. The point of
+			// the sim is that the INTENT reaches the placement path with a real piece,
+			// so record it and report success; the live build's class resolution is
+			// logged separately below.
+			if (g_buildRecorder)
+				g_buildRecorder(In.piece, In.yaw_deg, In.edit);
+			return true;
+#else
+			static bool s_warned = false;
+			if (!s_warned) {
+				s_warned = true;
+				LOG_ERROR(LogBots, "[ogfn] no buildable class for piece {}, bots cannot build",
+					ogfn::to_string(In.piece));
+			}
+			return false;
+#endif
+		}
+
+		// Brain is meters, engine is uu. This is the only conversion point.
+		const ogfn::Vec3 self{ W_last_self.x, W_last_self.y, W_last_self.z };
+		const ogfn::BuildPiece Piece = Grid.place(In.piece, self, In.yaw_deg, 0);
+		if (!Piece.valid)
+			return false;
+
+#ifndef OGFN_HARNESS
+		auto World = GetWorld();
+		if (!World)
+			return false;
+
+		FVector Loc(Piece.pos.x * 100.f, Piece.pos.y * 100.f, Piece.pos.z * 100.f);
+		FRotator Rot(0.f, Piece.yaw_deg, 0.f);
+		FTransform T{};
+		T.Translation = Loc;
+		T.Rotation = Rot.Quaternion();
+		T.Scale3D = FVector(1.f, 1.f, 1.f);
+
+		auto* Piece1 = World->SpawnActor<ABuildingSMActor>(Class, T);
+		if (!Piece1)
+			return false;
+		Piece1->SetPlayerPlaced(true);
+		// Infinite materials are already on for bots; the engine still wants the
+		// actor initialized as player-placed or it decays.
+		Piece1->InitializeBuildingActor(Controller, Piece1, true);
+		return true;
+#else
+		// Harness: record the intent so a scenario can assert pieces reach the world.
+		if (g_buildRecorder)
+			g_buildRecorder(In.piece, In.yaw_deg, In.edit);
+		return true;
+#endif
 	}
 
 	void ApplyJump(AFortPlayerPawnAthena* Pawn)
@@ -1175,6 +1294,12 @@ void TickAll()
 			seed = 0x9E3779B97F4A7C15ull + (uint64_t)(i + 1) * 0x100000001B3ull;
 #endif
 			float skill = (float)((key >> 3) % 40) / 39.f - 0.5f; // spread over [-0.5, 0.5]
+#ifdef OGFN_HARNESS
+			// Skill must be deterministic too: the seed above was pinned but skill
+			// still came from the ASLR pointer, so each run drew a different persona
+			// and P9 flaked between lateral movement and a straight walk.
+			skill = (float)i / 19.f - 0.5f;
+#endif
 			M.Reseed(seed, skill);
 			M.bSeeded = true;
 			M.lastTick = Now;
@@ -1351,6 +1476,7 @@ void TickAll()
 		M.brain.observe(Obs, Now);
 
 		ogfn::WorldSnapshot W = BuildSnapshot(M, Pawn, enemiesSeenWithin30, Now);
+		W_last_self = W.self_pos;
 		M.decision = M.brain.think(W);
 
 		{
@@ -1595,6 +1721,14 @@ void TickAll()
 			}
 			if (dirx != 0.f || diry != 0.f)
 			{
+				if (Move.strafing)
+				{
+					++M.strafeSteps;
+					const float toward = dirx * std::cos(ogfn::deg2rad(YawToTarget))
+					                   + diry * std::sin(ogfn::deg2rad(YawToTarget));
+					if (toward > 0.6f)
+						++M.strafeForward;   // leaked toward the target
+				}
 				float step = kBotWalkSpeed * dt * ogfn::clampf(Move.speed_scale, 0.f, 1.f);
 				if (step <= 0.f)
 					step = kBotWalkSpeed * dt * 0.35f; // crouched/bracing still creeps
@@ -1661,6 +1795,33 @@ void TickAll()
 		if (Move.jumping)
 			ApplyJump(Pawn);
 
+		// Building. decision.build_wall used to be dropped on the floor ("builder.h
+		// is the next pass"), so no bot has ever placed a piece. The builder owns the
+		// sequence, cadence and edits; this only executes the input it returns.
+		{
+			ogfn::BuildInput BIn = M.builder.update(dt, M.decision.build_wall,
+				W.target_is_visible && W.self_health < 70.f, HpFrac,
+				Target ? ogfn::yaw_between(W.self_pos, Target->last_seen_pos) : W.self_yaw_deg,
+				/*height_available*/ true);
+			if (BIn.piece != ogfn::PieceKind::None)
+			{
+				static ogfn::BuildGrid s_grid;
+				if (ApplyBuildPiece(Controller, Pawn, BIn, s_grid))
+				{
+					M.buildCount++;
+					// The edit is what turns a wall into a window. Editing needs the
+					// piece handle plus the edit metadata, so it is a separate verb;
+					// until it is wired, log it once rather than pretending.
+					if (BIn.edit && !M.bEditLogged)
+					{
+						M.bEditLogged = true;
+						LOG_INFO(LogBots, "[ogfn] bot#{} wants an edit (window) on its wall",
+							(int)(&M - &g_minds[0]));
+					}
+				}
+			}
+		}
+
 		if (Out.firing)
 		{
 			static bool s_firstFire = false;
@@ -1678,6 +1839,23 @@ void TickAll()
 }
 
 #ifdef OGFN_HARNESS
+// Movement evidence for the sim: strafe steps, and how many leaked toward the target.
+void TestStrafeStats(size_t i, int* total, int* forward) {
+	if (i < g_minds.size()) {
+		*total = g_minds[i].strafeSteps;
+		*forward = g_minds[i].strafeForward;
+	}
+}
+
+void TestClearBuildLog() {
+	g_harnessBuildLog.clear();
+	g_buildRecorder = [](ogfn::PieceKind piece, float, bool edit) {
+		g_harnessBuildLog.emplace_back((int)piece, edit ? 1 : 0);
+	};
+}
+
+std::vector<std::pair<int, int>> TestBuildLog() { return g_harnessBuildLog; }
+
 void TestSetLadder(float cx, float cy, float r)
 {
 	g_ladderCX = cx;

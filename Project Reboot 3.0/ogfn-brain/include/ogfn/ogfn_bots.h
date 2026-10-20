@@ -1,6 +1,7 @@
 #pragma once
 // Singles-header umbrella for the bot brain static library.
 #include "brain.h"
+#include "building.h"
 #include "locomotion.h"
 #include "mathx.h"
 #include "motor.h"

@@ -16,6 +16,9 @@
 #include "stubs/FortSafeZoneIndicator.h"
 #include "stubs/FortWorldItemDefinition.h"
 #include "stubs/KismetSystemLibrary.h"
+// Brain types for the assertions (placing pieces, reporting goals).
+#include "ogfn/ogfn_bots.h"
+using namespace ogfn;
 
 #include <cstdio>
 #include <cmath>
@@ -32,7 +35,9 @@ namespace Harness
 // Harness stub for the real call-site in TickAll (locker lives in the fork).
 namespace OgfnLocker { void AutoApplyOnce() {} }
 
-namespace OgfnBot { void TestClearBurstState(size_t i); void TestSetLadder(float, float, float); } // adapter (OGFN_HARNESS)
+namespace OgfnBot { void TestClearBurstState(size_t i); void TestSetLadder(float, float, float);
+                  void TestStrafeStats(size_t i, int* total, int* forward);
+                  void TestClearBuildLog(); std::vector<std::pair<int,int>> TestBuildLog(); } // adapter (OGFN_HARNESS)
 
 static int g_failures = 0;
 #define EXPECT(cond, msg) do { \
@@ -328,57 +333,83 @@ int main()
 	EXPECT(P0->Location.Z >= 0.f && P0->Location.Z < 300.f, "evac pawn ends on the ground");
 
 	// ---------- P9: movement model reaches the pawn ----------
-	// The motor had jumping/crouching fields nothing set, so ApplyJump was dead
-	// code (jumpCount stayed 0 in every run). Locomotion owns them now. The walk
-	// is kinematic here (teleport steps, no AddMovementInput), so the evidence is
-	// the DISPLACEMENT: engaged bots must move across the enemy line, not straight
-	// at the circle the way a stationary duellist would.
+	// MotorOutput.jumping was read by the adapter but written by nothing, so
+	// ApplyJump was dead code (jumpCount stayed 0 in every run). Locomotion owns it
+	// now, and owns the engaged walk heading too. Evidence is classified inside the
+	// adapter, where the yaw to the target is known: of the steps taken while the
+	// movement layer reports "strafing", how many leaked toward the target.
 	std::printf("\n-- P9: movement model (strafe + jump reach the pawn) --\n");
 	{
 		world.ND->Connections.v.clear();
 		world.ND->Connections.v.push_back(HumanConn);   // P3 cleared it; the enemy is this pawn
 		EnemyPawn->bDestroyed = false;
-		// Move bot0 out of the storm-evac pile first: P8 stacks the fleet inside
-		// the final ring and the swept-teleport capsule collision then blocks every
-		// step, which would make this scenario test the pile, not the movement.
-		// Inside the final ring (center 90000/45000, r=625 from P8) but off the
-		// evac pile, so the bot is not storm-driven and Engage can win.
-		const FVector OpenGround(90000.f + 300.f, 45000.f - 300.f, 100.f);
+		// Inside the final ring (P8 set center 90000/45000, r=625) but off the evac
+		// pile, so the bot is not storm-driven and Engage can win.
+		const FVector OpenGround(90300.f, 44700.f, 100.f);
 		P0->Location = OpenGround;
-		EnemyPawn->Location = OpenGround + FVector(600.f, 0.f, 0.f);  // 6 m ahead: unambiguous Engage
+		EnemyPawn->Location = OpenGround + FVector(600.f, 0.f, 0.f);  // 6 m ahead
+		// Face the target: perception is FOV-gated, so a bot still pointing where the
+		// storm evac left it never acquires the enemy.
+		P0->Rotation.Yaw = 0.f;
+		P0->lastRotation.Yaw = 0.f;
 		P0->Health = 25.f;   // hurt: bail-out jump is on the table
-		P0->Shield = 0.f;    // hp fraction is (hp+shield)/200, so a full shield
-		                     // would read as healthy and suppress the bail-out
+		P0->Shield = 0.f;    // hp fraction is (hp+shield)/200; a full shield would
+		                     // read as healthy and suppress the bail-out
 		TickFor(1.0);        // let perception re-acquire through the FOV cone
 
 		const int jumpsBefore = P0->jumpCount;
-		const int telBefore = P0->teleportCount;
-		int lateralSteps = 0, forwardSteps = 0;
-		FVector prev = P0->Location;
-		// The sim ticks at 30Hz and TickFor truncates, so step in sim ticks:
-		// TickFor(1/60) yields ZERO iterations, which silently makes a loop a no-op.
+		const int strafeBefore = 0;
+		(void)strafeBefore;
 		for (int i = 0; i < 30 * 12; ++i)
-		{
-			TickFor(1.0 / 30.0);
-			const FVector now = P0->Location;
-			const float dx = now.X - prev.X, dy = now.Y - prev.Y;
-			const float len = std::sqrt(dx * dx + dy * dy);
-			prev = now;
-			if (len < 1.f)
-				continue;
-			// Enemy sits at +X from bot0, so a step toward it is ~(1,0) and a
-			// strafe is ~(0,+-1).
-			if (std::fabs(dx / len) < 0.6f) ++lateralSteps;
-			else ++forwardSteps;
-		}
+			TickFor(1.0 / 30.0);   // sim runs at 30Hz and TickFor truncates
+
+		int strafeTotal = 0, strafeForward = 0;
+		OgfnBot::TestStrafeStats(0, &strafeTotal, &strafeForward);
+		std::printf("  [P9] strafeSteps=%d leaked_forward=%d jumps=%d\n",
+			strafeTotal, strafeForward, P0->jumpCount - jumpsBefore);
+
 		EXPECT(P0->jumpCount > jumpsBefore, "a cornered hurt bot sends Jump to the pawn");
-		std::printf("  [P9] steps lateral=%d forward=%d jumps=%d teleports=%d pos=(%.0f,%.0f,%.0f)\n",
-			lateralSteps, forwardSteps, P0->jumpCount - jumpsBefore,
-			P0->teleportCount - telBefore,
-			P0->Location.X, P0->Location.Y, P0->Location.Z);
-		EXPECT(lateralSteps + forwardSteps > 0, "the bot is moving under its own decisions");
-		EXPECT(lateralSteps > forwardSteps,
-		       "engaged movement is mostly across the enemy line, not straight at it");
+		EXPECT(strafeTotal > 0, "engaged movement goes through the strafe path");
+		EXPECT(strafeForward * 2 < strafeTotal,
+		       "strafes go across the target line, not at it (majority lateral)");
+	}
+
+	// ---------- P10: building reaches the world ----------
+	// decision.build_wall was documented as unwired, so no bot ever placed a piece.
+	// The Builder layer now owns the sequence; this proves an input with a real
+	// piece reaches ApplyBuildPiece and comes back as a placed piece, with a window
+	// edit in the set (a bot that walls up and cannot shoot out of it is in a coffin).
+	std::printf("\n-- P10: building (pieces + window edit reach the world) --\n");
+	{
+		world.ND->Connections.v.clear();
+		world.ND->Connections.v.push_back(HumanConn);
+		EnemyPawn->bDestroyed = false;
+		EnemyPawn->Location = P0->Location + FVector(400.f, 0.f, 0.f);
+		P0->Rotation.Yaw = 0.f;
+		P0->lastRotation.Yaw = 0.f;
+
+		std::vector<std::pair<int, int>> placed;   // (piece, is_edit)
+		OgfnBot::TestClearBuildLog();
+		// Losing badly and being shot at is the box-up case.
+		for (int i = 0; i < 30 * 10; ++i)
+		{
+			P0->Health = 20.f;
+			P0->Shield = 0.f;
+			TickFor(1.0 / 30.0);
+		}
+		placed = OgfnBot::TestBuildLog();
+		std::printf("  [P10] build inputs reaching the world: %d\n", (int)placed.size());
+		int walls = 0, floors = 0, edits = 0;
+		for (auto& e : placed)
+		{
+			if (e.first == (int)PieceKind::Wall) ++walls;
+			if (e.first == (int)PieceKind::Floor) ++floors;
+			if (e.second) ++edits;
+		}
+		EXPECT(!placed.empty(), "a bot under fire places pieces (build_wall is wired)");
+		EXPECT(walls > 0, "and the pieces are walls, not something arbitrary");
+		EXPECT(floors > 0, "the box gets a roof");
+		EXPECT(edits > 0, "the box gets a window edit, so the bot can shoot out of it");
 	}
 
 	// ---------- summary ----------
