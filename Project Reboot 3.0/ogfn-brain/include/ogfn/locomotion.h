@@ -94,6 +94,11 @@ class Locomotion {
   // Gaze: while travelling a player looks along the way, with occasional
   // shoulder-checks sideways. The check is a held habit for a second or two, not a
   // per-tick shake.
+  // Continuous speed variation: a slow wander plus a dip while turning. Without
+  // these the speed was four constants with a 64% modal value, which is a state
+  // machine and reads as one.
+  float speed_wander_ = 0.f;
+  float turn_load_ = 0.f;
   double next_glance_ = 0.0;
   double glance_until_ = 0.0;
   float glance_offset_ = 0.f;

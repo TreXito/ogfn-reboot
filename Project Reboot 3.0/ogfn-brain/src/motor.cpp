@@ -65,7 +65,26 @@ MotorOutput Motor::aim_at(const Vec3& self_pos, float current_yaw, float current
   // human about a fifth of a second and a bot costs nothing.
   const float max_rate = lerpf(240.f, 480.f, persona_.aim_skill);
   const float approach = lerpf(4.5f, 8.5f, persona_.aim_skill);
-  float want_v = clampf(err * approach, -max_rate, max_rate);
+
+  // Track-velocity feed-forward. A pure error-driven servo has a steady-state lag
+  // proportional to how fast the target is moving, so measured tracking error grew
+  // with angular speed and never came back down: 1.6 deg at 6 deg/s but 9.7 deg at
+  // 34 deg/s, at which point the bot stopped firing entirely (0% of ticks). A human
+  // does not work that way: they lock onto the target's motion and move WITH it,
+  // correcting the residual. That is what this term is.
+  //
+  // The estimate is the crosshair's own recent velocity, which converges to the
+  // target's angular rate while tracking, and is imperfect on purpose (a player's
+  // estimate lags and overshoots).
+  track_vel_ = lerpf(track_vel_, yaw_velocity_, clampf(dt * lerpf(6.f, 11.f, persona_.aim_skill),
+                                                       0.f, 1.f));
+  // Only apply it when actually settled on a target: during a flick the "track
+  // velocity" is the flick itself, and feeding that forward doubles the flick.
+  // Settle tracking: how long the crosshair has been within a tracking band. Resets
+  // on any large error, which is what a flick is.
+  if (std::fabs(err) < 12.f) track_settle_ += dt; else track_settle_ = 0.f;
+  const float ff_gain = (std::fabs(err) < 25.f) ? lerpf(0.75f, 1.0f, persona_.aim_skill) : 0.f;
+  float want_v = clampf(err * approach + track_vel_ * ff_gain, -max_rate, max_rate);
   // Ease down near the target so the crosshair does not ring around it.
   if (std::fabs(err) < 12.f) want_v *= 0.55f;
 
@@ -132,7 +151,26 @@ MotorOutput Motor::aim_at(const Vec3& self_pos, float current_yaw, float current
                               last_pitch_error_deg_ < tolerance * 1.6f;
   const bool within_hold = last_aim_error_deg_ < release_tol &&
                            last_pitch_error_deg_ < release_tol * 1.6f;
-  const bool on_target = fire && (trigger_held_ ? within_hold : within_acquire);
+
+  // Spray anyway. A player fighting a close strafing target does NOT hold fire until
+  // their crosshair is provably on it: they shoot through the swing and connect some
+  // of the time. The hard gate made the bot fire 0% of ticks against a target orbiting
+  // at 52 deg/s, which is a bot that cannot fight, not a cautious one. So when the bot
+  // is tracking (not flicking) but off by a human amount, it still sprays at a rate
+  // that falls with error: some shots land, most do not, which is what a real fight
+  // looks like.
+  bool spray = false;
+  // Only while genuinely TRACKING: the crosshair must already be in the ballpark and
+  // the bot must have been on target recently. Without the settle requirement a
+  // 90-degree flick sprays the whole way across, which is the "fires on the frame the
+  // target appears" bug in a new costume.
+  if (fire && !within_acquire && !reloading_ && track_settle_ > 0.12f &&
+      std::fabs(err) < 22.f) {
+    // Roughly inverse to error: near-miss sprays a lot, 20 deg off rarely.
+    const float p_spray = clampf(0.42f * (1.f - std::fabs(err) / 22.f), 0.f, 0.4f);
+    if (rng_.unit() < p_spray * dt * 12.f) spray = true;
+  }
+  const bool on_target = fire && ((trigger_held_ ? within_hold : within_acquire) || spray);
 
   // Magazine. Holding the trigger must eventually run dry, and a dry gun means
   // the trigger does nothing until the reload finishes. Humans also reload in

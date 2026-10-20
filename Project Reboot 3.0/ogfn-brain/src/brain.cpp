@@ -71,7 +71,15 @@ float Brain::score(ActionKind k, const WorldSnapshot& w) const {
       if (w.distance_to_circle_edge <= -20.f) return 0.02f;
       float s = 0.35f + zp;
       s *= 1.f - p.caution * 0.25f;
-      if (engaged) s *= 0.25f;
+      // A fight does NOT outrank dying to the storm. Previously it discounted this to
+      // 0.25x, and a bot 20m outside the ring chose to trade shots with an enemy 25m
+      // away instead of running: measured over a 50-bot match, the storm killed 1 bot
+      // and fights killed 47, when a real BR has the storm take a real share. Deep
+      // outside the ring, rotating is the only thing a player does.
+      // Being OUTSIDE AT ALL is the threshold, not being far outside. The old ramp
+      // needed ~10m before rotate overtook a fight, so a bot 2m out kept trading.
+      const float outside = clampf(w.distance_to_circle_edge / 6.f + 0.35f, 0.f, 1.f);
+      if (engaged) s *= lerpf(0.25f, 1.45f, outside);
       return s;
     }
 
@@ -88,6 +96,12 @@ float Brain::score(ActionKind k, const WorldSnapshot& w) const {
       s *= lerpf(0.35f, 1.f, clampf(hp * 1.2f, 0.f, 1.f) + p.aggression * 0.3f);
       if (w.target_is_reloading) s *= 1.25f;
       if (w.target_health < 50.f) s *= 1.30f;
+      // Standing in the storm to finish a fight gets you killed by the storm. A player
+      // keeps shooting only while they can still outrun it.
+      // Any time outside the ring, a fight is deprioritised: you cannot win a fight
+      // you are losing to the storm.
+      const float deep_outside = clampf(w.distance_to_circle_edge / 8.f + 0.3f, 0.f, 1.f);
+      s *= lerpf(1.f, 0.45f, deep_outside);
       return s;
     }
 
@@ -119,9 +133,20 @@ float Brain::score(ActionKind k, const WorldSnapshot& w) const {
 
     case ActionKind::Flee: {
       if (!engaged) return 0.f;
+      // Nobody runs from a distant enemy at full health. Without a distance term a
+      // 100hp bot fled a target 50m away, which reads as cowardice the game does not
+      // have: you disengage from something that can actually hurt you, and the
+      // further it is the less it can.
+      const float threat = clampf(1.f - (w.target_distance - 8.f) / 32.f, 0.f, 1.f);
+      if (threat <= 0.02f) return 0.f;
       float s = 0.20f * (0.3f + p.caution);
       s *= lerpf(2.6f, 0.2f, hp);  // only desperate bots run
+      s *= threat;                 // and only from something close
       s *= 1.f - p.aggression * 0.5f;
+      // Desperation bonus: at near-death, leaving is better than any trade or build.
+      // Without it Build always won for a hurt bot (building is scored highest when
+      // low), so nothing ever fled in someone's face at 10hp.
+      if (hp < 0.25f) s *= 2.4f;
       return s;
     }
 

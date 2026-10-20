@@ -77,6 +77,8 @@ MoveOutput Locomotion::update(float dt, float self_yaw_deg, float yaw_to_target_
       if (!keep) {
         strafe_sign_ = -strafe_sign_;
         ++strafe_flips_;
+        // Reversing direction costs momentum: the player slows to change direction.
+        turn_load_ = clampf(turn_load_ + 1.f, 0.f, 1.f);
       }
       retime();
     }
@@ -100,15 +102,32 @@ MoveOutput Locomotion::update(float dt, float self_yaw_deg, float yaw_to_target_
   // --- speed --------------------------------------------------------------------
   // Shooting costs movement, but not all of it: standing still to aim is a
   // bot-like habit, and so is sprinting while firing.
+  float base_speed;
   if (engaged) {
-    out.speed_scale = firing ? 0.72f : 0.95f;
-    if (st.on_slope) out.speed_scale *= 0.75f;
-    if (reloading) out.speed_scale = 0.85f;  // reposition while reloading
+    base_speed = firing ? 0.72f : 0.95f;
+    if (st.on_slope) base_speed *= 0.75f;
+    if (reloading) base_speed = 0.85f;  // reposition while reloading
   } else {
-    out.speed_scale = st.on_slope ? 0.7f : 1.f;
+    base_speed = st.on_slope ? 0.7f : 1.f;
   }
   // A badly hurt player backs off faster than they push, whatever their persona.
-  if (engaged && health_frac < 0.35f) out.speed_scale = clampf(out.speed_scale + 0.05f, 0.f, 1.f);
+  if (engaged && health_frac < 0.35f) base_speed += 0.05f;
+
+  // Speed is not a set of four constants. Measured, the layer produced 4 distinct
+  // values with a 64% modal: a hard state machine, which is exactly the signature a
+  // movement detector looks for. A human's stick input drifts continuously, and it
+  // dips when they are turning or unsure where to go.
+  //
+  // Two continuous components:
+  //   * a slow wander, so a bot's pace drifts over a couple of seconds;
+  //   * a dip proportional to how hard it is currently turning, because you slow
+  //     down to change direction.
+  speed_wander_ += rng_.normal(0.f, 1.f) * dt * 0.55f;
+  speed_wander_ = clampf(speed_wander_, -0.12f, 0.10f);
+  const float turn_dip = clampf(turn_load_, 0.f, 1.f) * 0.18f;
+  out.speed_scale = clampf(base_speed + speed_wander_ - turn_dip, 0.05f, 1.f);
+  // Turn load decays: it is a response to a recent sharp change, not a permanent tax.
+  turn_load_ = (std::max)(0.f, turn_load_ - dt * 2.2f);
 
   // --- crouching ----------------------------------------------------------------
   // Two habits: holding cover while not shooting, and crouch-spam while trading

@@ -117,6 +117,10 @@ class Motor {
   Rng rng_;
   float yaw_velocity_ = 0.f;      // deg/s, for the servo
   float pitch_velocity_ = 0.f;
+  // Estimated angular velocity of the thing being tracked, for feed-forward. Without
+  // it the servo lags a moving target by an amount proportional to its speed.
+  float track_vel_ = 0.f;
+  float track_settle_ = 0.f;   // seconds on target within the tracking band
   float last_aim_error_deg_ = 0.f;
   float last_pitch_error_deg_ = 0.f;
   float recoil_pitch_ = 0.f;      // accumulated muzzle climb, decays between bursts
