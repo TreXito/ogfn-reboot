@@ -8,11 +8,12 @@
 //   motor  -> degradation: aim servo with overshoot, trigger discipline, jitter, idle scan
 //
 // Scope of this pass:
-//   observe -> think -> aim/move/jump/fire, weapon grant on join, zone steering,
-//   loot density counting, one-shot diagnostics for build-dependent names.
-// Not yet wired (slots kept, documented): building (decision.build_wall -> builder.h),
-// loot pathing to picked-up items, navmesh steering (movement is straight-line to the
-// decision's move_to until ai.h SetNavigationSystem is enabled for 3.5).
+//   observe -> think -> aim/move/strafe/crouch/jump/fire/build, weapon grant on join,
+//   zone steering, loot density counting, one-shot diagnostics for build names.
+// Not yet wired: build EDITS (a wall becomes a window through a separate verb; the
+// builder emits the edit intent and the adapter logs it), loot pathing to picked-up
+// items, navmesh steering (movement is straight-line to the decision's move_to until
+// ai.h SetNavigationSystem is enabled for 3.5).
 //
 // Every engine verb goes through FindFunction + ProcessEvent or the fork's existing
 // wrappers, and every build-dependent name is resolved at runtime with logged misses,
@@ -1834,7 +1835,6 @@ void TickAll()
 			ApplyFire(Pawn);
 		}
 
-		// decision.build_wall intentionally unwired: builder.h is the next pass.
 	}
 }
 
