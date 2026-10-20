@@ -176,6 +176,12 @@ Decision Brain::make_intent(ActionKind a, const WorldSnapshot& w) {
       } else {
         d.move_to = Vec3(tx, ty, 0.f);
       }
+      // Look where you are going. This is the difference between a player who runs
+      // toward the zone and a bot that moonwalks toward it with its crosshair on a
+      // wall: measured, the crosshair was a median 85 degrees off the travel line.
+      const float travel = yaw_between(w.self_pos, d.move_to);
+      d.look_yaw_deg = gaze_active_ ? gaze_yaw_deg_ : travel;
+      d.face_travel = true;
       break;
     }
     case ActionKind::Heal:
@@ -191,6 +197,9 @@ Decision Brain::make_intent(ActionKind a, const WorldSnapshot& w) {
                                   in_combat(w));
       if (loot_choice_.want) {
         d.move_to = loot_choice_.pos;
+        // Walking to loot: eyes on the loot.
+        d.look_yaw_deg = yaw_between(w.self_pos, d.move_to);
+        d.face_travel = true;
       } else {
         // Nothing worth walking to: the honest human response is to keep moving
         // with the zone, not to stand in a field.
@@ -202,19 +211,31 @@ Decision Brain::make_intent(ActionKind a, const WorldSnapshot& w) {
       // Third-partying means going to the fight, not to the circle. It used to
       // fall through to `default` as well, so this action did nothing at all.
       d.move_to = Vec3(w.fight_x, w.fight_y, 0.f);
+      // Walking to a fight: watch the fight, not the ground.
+      d.look_yaw_deg = yaw_between(w.self_pos, d.move_to);
+      d.face_travel = true;
       break;
     }
     case ActionKind::HoldAngle:
       // Holding an angle means holding position: no destination by design, which
       // is exactly what move_to (0,0,0) would otherwise mean by accident.
       d.move_to = w.self_pos;
+      // ...but a player holding an angle is LOOKING down it, not at their feet.
+      d.look_yaw_deg = gaze_active_ ? gaze_yaw_deg_ : w.self_yaw_deg;
+      d.face_travel = false;
       break;
     case ActionKind::Idle:
       d.move_to = w.self_pos;
+      // Standing still: the movement layer's shoulder-check, if it has one, is what
+      // the view should follow. Nothing to face otherwise.
+      d.look_yaw_deg = gaze_active_ ? gaze_yaw_deg_ : w.self_yaw_deg;
+      d.face_travel = gaze_active_;
       break;
     case ActionKind::Revive:
       if (squad_directive_.should_revive) d.move_to = squad_directive_.revive_at;
       else d.move_to = w.self_pos;
+      d.look_yaw_deg = yaw_between(w.self_pos, d.move_to);
+      d.face_travel = true;
       break;
   }
   return d;
@@ -241,6 +262,15 @@ Decision Brain::think(const WorldSnapshot& w) {
     Decision d = make_intent(last_action_, w);
     d.reason = "committed";
     d.score = last_score_;
+    // Keep the gaze that was PLANNED, not a freshly derived one. make_intent recomputes
+    // look_yaw from this tick's move_to, and for a rotation that target is re-derived
+    // every tick while the planned gaze was fixed at the plan beat: the two disagreed
+    // by a constant 58 degrees. Where you are looking is a decision, and a committed
+    // bot does not change its mind about it mid-beat.
+    if (last_face_travel_) {
+      d.look_yaw_deg = last_look_yaw_;
+      d.face_travel = true;
+    }
     return d;
   }
   next_plan_time_ = w.time + rng_.range(plan_fast_secs_, plan_slow_secs_);
@@ -316,6 +346,10 @@ Decision Brain::think(const WorldSnapshot& w) {
 
   if (held_by_reaction) {
     Decision d = make_intent(last_action_, w);
+    if (last_face_travel_) {
+      d.look_yaw_deg = last_look_yaw_;
+      d.face_travel = true;
+    }
     d.reason = "reaction delay";
     d.score = last_score_;
     d.scores = best.scores;
@@ -344,6 +378,8 @@ Decision Brain::think(const WorldSnapshot& w) {
   }
 
   Decision planned = make_intent(best.action, w);
+  last_look_yaw_ = planned.look_yaw_deg;
+  last_face_travel_ = planned.face_travel;
   planned.score = best.score;
   planned.scores = std::move(best.scores);
   planned.reason = "plan";

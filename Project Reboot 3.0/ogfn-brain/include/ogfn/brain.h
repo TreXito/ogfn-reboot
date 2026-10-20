@@ -65,6 +65,11 @@ struct WorldSnapshot {
   std::vector<Teammate> teammates;
   bool enemies_pushing_me = false;   // taking damage this moment
   uint64_t now_ms = 0;               // monotonic clock for call cooldowns
+  // Legs. Where the bot is travelling and how far, when it is travelling: the brain
+  // needs this to decide where to LOOK, and looking where you walk is one of the most
+  // basic human tells. Optional: zeros mean "not travelling".
+  Vec3 travel_to;
+  bool travelling = false;
 };
 
 struct Decision {
@@ -73,6 +78,12 @@ struct Decision {
   Vec3 move_to;
   bool fire = false;
   bool build_wall = false;
+  // Where the player is LOOKING as distinct from where they are going. A human faces
+  // their travel direction out of combat and their target inside one; the engine
+  // blends the camera toward this when face_travel is set. Without it a bot walks
+  // sideways with its crosshair on nothing.
+  float look_yaw_deg = 0.f;
+  bool face_travel = false;
   std::string reason;
 
   // All candidate scores, sorted, kept for tuning and tests.
@@ -106,6 +117,11 @@ class Brain {
   const LootValuer& loot_valuer() const { return loot_; }
   const SquadBrain& squad() const { return squad_; }
   const SquadDirective& squad_directive() const { return squad_directive_; }
+  // The view direction the movement layer asked for, if any. The engine blends the
+  // camera toward this out of combat and ignores it during a fight.
+  bool gaze_active() const { return gaze_active_; }
+  float gaze_yaw_deg() const { return gaze_yaw_deg_; }
+  void set_gaze(bool active, float yaw_deg) { gaze_active_ = active; gaze_yaw_deg_ = yaw_deg; }
 
   // What the bot decided to walk to. Persists across committed ticks (the valuation
   // only re-runs on a plan beat), and is empty when the last Loot plan found
@@ -144,6 +160,14 @@ class Brain {
   Persona persona_;
   Rng rng_;
   Perception perception_;
+  // Where the view should be, per the movement layer (see Locomotion::MoveOutput).
+  float gaze_yaw_deg_ = 0.f;
+  bool gaze_active_ = false;
+  // The gaze that was PLANNED at the last plan beat. Committed ticks reuse it instead
+  // of re-deriving one from a move_to that keeps moving.
+  float last_look_yaw_ = 0.f;
+  bool last_face_travel_ = false;
+
   // Fixed per bot: which side of the ring it prefers to rotate in on. Derived once
   // from the seed so a bot's rotation line is a habit, not a per-tick coin flip.
   float rotation_offset_rad_ = 0.f;

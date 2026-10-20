@@ -1841,8 +1841,6 @@ void TickAll()
 		}
 #endif
 
-		ApplyRotation(Pawn, Out.pitch_deg, Out.yaw_deg);
-
 		// Movement model. Feeds the strafe/crouch/jump layer real ground truth:
 		// whether the capsule is falling and how fast, whether there is a wall
 		// within arm's reach to peek from, and whether the floor is a slope.
@@ -1879,8 +1877,40 @@ void TickAll()
 			LocoState.vertical_speed = 0.f;
 			LocoState.on_slope = g_lastStepBlocked; // uphill/stuck reads as slope work
 		}
+		// Travel direction, which the movement layer uses for the gaze: a player looks
+		// where they run, and without this the crosshair sat a median 85 degrees off the
+		// travel line (walking sideways, staring at nothing).
+		const float TravelYaw = (M.decision.move_to.x != 0.f || M.decision.move_to.y != 0.f)
+			? ogfn::yaw_between(W.self_pos, M.decision.move_to)
+			: W.self_yaw_deg;
 		const ogfn::MoveOutput Move = M.loco.update(dt, W.self_yaw_deg, YawToTarget,
-			W.target_distance, bEngaged, Out.firing, M.motor.reloading(), HpFrac, LocoState);
+			W.target_distance, bEngaged, Out.firing, M.motor.reloading(), HpFrac, LocoState,
+			TravelYaw, /*travel_supplied*/ (M.decision.move_to.x != 0.f ||
+			                                 M.decision.move_to.y != 0.f));
+		// Hand the gaze to the brain so the next decision carries it.
+		M.brain.set_gaze(Move.gaze_weight > 0.f, Move.gaze_yaw_deg);
+
+		// Camera vs body. The body yaw is ALSO the perception FOV axis (Obs.self_yaw_deg
+		// reads the pawn's rotation), so rotating the body toward travel would rotate
+		// the bot's eyes away from an enemy and break targeting: the first cut of this
+		// did exactly that and P2 caught it (zero shots). So:
+		//   * with a target in view, the aim owns the rotation, as before;
+		//   * with nothing in view, the view follows travel (or a shoulder check),
+		//     which is the case that was the tell: walking sideways, staring ahead.
+		float ViewYaw = Out.yaw_deg;
+		// Gaze only when the bot has seen nothing at all recently. A player walking
+		// across open ground looks where they walk; a player who just saw someone does
+		// not stop watching that direction to admire the scenery. Using "no targets in
+		// memory" rather than "no targets visible" means the body does not rotate away
+		// from a threat the instant it ducks behind cover, which is what delayed
+		// first-fire from 4.5s to 9.7s in P2.
+		const bool alone = M.brain.perception().targets().empty();
+		if (M.decision.face_travel && alone) {
+			const float Gw = ogfn::clampf(Move.gaze_weight, 0.f, 1.f);
+			ViewYaw = ogfn::wrap180(Out.yaw_deg +
+				ogfn::wrap180(M.decision.look_yaw_deg - Out.yaw_deg) * Gw);
+		}
+		ApplyRotation(Pawn, Out.pitch_deg, ViewYaw);
 #ifdef OGFN_SIM_TRACE
 		if (&M == &g_minds[0] && (int)(Now * 10.0) % 6 == 0)
 		{

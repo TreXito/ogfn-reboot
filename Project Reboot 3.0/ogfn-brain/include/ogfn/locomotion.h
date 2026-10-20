@@ -23,6 +23,13 @@ struct MoveOutput {
   bool jumping = false;
   bool strafing = false;
   bool bracing = false;  // falling far enough that the player has stopped steering
+  // Where the bot should be LOOKING while it travels, and how strongly. A player
+  // faces the direction they run, shoulder-checks while sprinting, and only turns
+  // their view to the fight once one starts. A bot that walks sideways with its
+  // crosshair pinned on nothing is a giveaway: measured, the crosshair was a median
+  // 85 degrees away from the travel direction.
+  float gaze_yaw_deg = 0.f;
+  float gaze_weight = 0.f;  // 0 = keep looking at the target, 1 = face travel fully
 };
 
 // The movement tell. A bot that stands still, strafes on a fixed beat, or jumps
@@ -47,7 +54,8 @@ class Locomotion {
 
   MoveOutput update(float dt, float self_yaw_deg, float yaw_to_target_deg,
                     float target_distance, bool engaged, bool firing, bool reloading,
-                    float health_frac, const MoveState& st);
+                    float health_frac, const MoveState& st,
+                    float travel_yaw_deg = 0.f, bool travel_supplied = false);
 
   // Telemetry hooks. The bench and the tests both read these, because "does it
   // strafe" is not a property, "does it strafe at a human rate" is.
@@ -83,5 +91,11 @@ class Locomotion {
 
   bool was_airborne_ = false;
   bool landing_brace_ = false;
+  // Gaze: while travelling a player looks along the way, with occasional
+  // shoulder-checks sideways. The check is a held habit for a second or two, not a
+  // per-tick shake.
+  double next_glance_ = 0.0;
+  double glance_until_ = 0.0;
+  float glance_offset_ = 0.f;
 };
 }  // namespace ogfn

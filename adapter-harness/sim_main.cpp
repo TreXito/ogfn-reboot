@@ -541,6 +541,40 @@ int main()
 		EXPECT(maxPitch > 5.f, "the motor drives vertical aim (pitch is no longer always 0)");
 	}
 
+	// ---------- P14: the view follows travel when nothing is in sight ----------
+	// The measured tell: the crosshair sat a median 85 degrees off the travel line,
+	// so bots walked sideways staring at nothing. The body yaw is also the perception
+	// FOV axis, so the fix has to yield the moment anything is in view.
+	std::printf("\n-- P14: gaze follows travel with nothing in sight --\n");
+	{
+		world.ND->Connections.v.clear();
+		EnemyPawn->bDestroyed = true;
+		Harness::g_wallUp = false;
+		OgfnBot::TestSetLadder(90000.f, 45000.f, 30000.f);
+		P0->Health = 100.f;
+		P0->Shield = 100.f;
+		// Outside a wide ring so the bot is genuinely travelling, facing away from it.
+		P0->Location = FVector(20000.f, 20000.f, 100.f);
+		P0->Rotation.Yaw = 180.f;
+		P0->lastRotation.Yaw = 180.f;
+		TickFor(2.0);
+
+		int aligned = 0, total = 0;
+		for (int i = 0; i < 30 * 8; ++i)
+		{
+			TickFor(1.0 / 30.0);
+			// Travel direction is toward the ring centre (+X/+Y quadrant).
+			const float travel = std::atan2(45000.0 - P0->Location.Y,
+			                                90000.0 - P0->Location.X) * 57.29578f;
+			const float off = std::fabs(std::remainder(P0->lastRotation.Yaw - travel, 360.0));
+			++total;
+			if (off < 45.f) ++aligned;
+		}
+		std::printf("  [P14] view within 45deg of travel on %d/%d samples (%.0f%%)\n",
+			aligned, total, 100.0 * aligned / total);
+		EXPECT(aligned * 2 > total, "with nothing in sight the bot faces where it walks");
+	}
+
 	// ---------- summary ----------
 	std::printf("\n=== summary ===\n");
 	std::printf("  pawn0: rot=%d move=%d jump=%d fire=%d firstFire=%.2fs\n",

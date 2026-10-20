@@ -28,7 +28,8 @@ float Locomotion::crouch_frame_cadence() const { return kCrouchTapFloor; }
 
 MoveOutput Locomotion::update(float dt, float self_yaw_deg, float yaw_to_target_deg,
                               float target_distance, bool engaged, bool firing,
-                              bool reloading, float health_frac, const MoveState& st) {
+                              bool reloading, float health_frac, const MoveState& st,
+                              float travel_yaw_deg, bool travel_supplied) {
   MoveOutput out;
   if (dt <= 0.f) return out;
   now_ += dt;
@@ -159,6 +160,44 @@ MoveOutput Locomotion::update(float dt, float self_yaw_deg, float yaw_to_target_
       next_jump_ = now_ + kJumpFloor + rng_.range(0.f, 1.4f);
       jump_gate_until_ = now_ + kJumpFloor;
     }
+  }
+
+  // --- gaze ---------------------------------------------------------------------
+  // A player looks where they run. Out of combat the view belongs to the travel
+  // direction, with a sideways shoulder-check every few seconds. In combat the view
+  // belongs to the fight and travel is handled by strafing, so the weight drops to
+  // zero: this is the part that keeps a bot from staring at a wall while walking.
+  if (engaged) {
+    out.gaze_weight = 0.f;
+    out.gaze_yaw_deg = yaw_to_target_deg;
+  } else if (out.bracing) {
+    // Falling: no interest in looking anywhere in particular.
+    out.gaze_weight = 0.f;
+    out.gaze_yaw_deg = travel_yaw_deg;
+  } else {
+    // Shoulder-check: hold a glance off-axis for a beat, then return to travel.
+    // With nowhere to go there is nothing to check relative to: the view holds,
+    // which is what standing still actually looks like. Without this the bot
+    // pirouetted in place while idle (a glance relative to an arbitrary heading),
+    // and the body rotation is also the perception FOV axis.
+    if (!travel_supplied) {
+      out.gaze_weight = 0.f;
+      out.gaze_yaw_deg = self_yaw_deg;
+      return out;
+    }
+    if (now_ > next_glance_) {
+      // A shoulder check is a glance to ONE flank, 25 to 55 degrees, not a spin. The
+      // first version allowed +-70 and a 10% p90 of 102 degrees off travel, which is
+      // a bot pirouetting while it runs.
+      glance_offset_ = rng_.range(25.f, 55.f) * (rng_.unit() < 0.5f ? -1.f : 1.f);
+      glance_until_ = now_ + rng_.range(0.35f, 0.9f);
+      next_glance_ = now_ + rng_.range(3.5f, 9.0f);
+    }
+    const bool glancing = now_ < glance_until_;
+    // Weight below 1.0 so the engine can blend the gaze in rather than snapping the
+    // view, which is what the smoothing is for: a neck turns over ~0.2s.
+    out.gaze_yaw_deg = glancing ? wrap180(travel_yaw_deg + glance_offset_) : travel_yaw_deg;
+    out.gaze_weight = 0.85f;
   }
 
   return out;
