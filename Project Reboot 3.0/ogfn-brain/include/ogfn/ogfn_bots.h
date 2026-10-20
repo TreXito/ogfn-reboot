@@ -9,3 +9,4 @@
 #include "perception.h"
 #include "persona.h"
 #include "rng.h"
+#include "squad.h"

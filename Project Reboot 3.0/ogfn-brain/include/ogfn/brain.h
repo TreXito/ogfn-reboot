@@ -8,6 +8,7 @@
 #include "perception.h"
 #include "persona.h"
 #include "rng.h"
+#include "squad.h"
 
 namespace ogfn {
 
@@ -21,6 +22,9 @@ enum class ActionKind {
   Flee,
   ThirdParty,
   HoldAngle,
+  // Walk to a downed squadmate. Its own action rather than a disguised rotation so
+  // telemetry and the bench can see revives as revives.
+  Revive,
 };
 
 const char* to_string(ActionKind k);
@@ -55,6 +59,12 @@ struct WorldSnapshot {
   Inventory inventory;
   // Where the fight the bot is third-partying is happening (used by ThirdParty).
   float fight_x = 0.f, fight_y = 0.f;
+
+  // Squad context. Empty (or all solo) means the old solo behaviour exactly, so a
+  // solo lobby is unchanged and only real squads get squad decisions.
+  std::vector<Teammate> teammates;
+  bool enemies_pushing_me = false;   // taking damage this moment
+  uint64_t now_ms = 0;               // monotonic clock for call cooldowns
 };
 
 struct Decision {
@@ -82,7 +92,8 @@ struct Decision {
 // only scores that shift as the world does.
 class Brain {
  public:
-  Brain(Persona p, uint64_t seed) : persona_(p), rng_(seed), loot_(p, seed ^ 0x10077ull) {
+  Brain(Persona p, uint64_t seed)
+      : persona_(p), rng_(seed), loot_(p, seed ^ 0x10077ull), squad_(seed ^ 0x5C0ADull) {
     // Re-plan cadence: impatient bots re-evaluate quicker, patient ones settle.
     plan_fast_secs_ = lerpf(0.09f, 0.06f, p.patience);
     plan_slow_secs_ = lerpf(0.24f, 0.12f, p.patience);
@@ -90,6 +101,8 @@ class Brain {
 
   const Persona& persona() const { return persona_; }
   const LootValuer& loot_valuer() const { return loot_; }
+  const SquadBrain& squad() const { return squad_; }
+  const SquadDirective& squad_directive() const { return squad_directive_; }
 
   // What the bot decided to walk to. Persists across committed ticks (the valuation
   // only re-runs on a plan beat), and is empty when the last Loot plan found
@@ -130,6 +143,8 @@ class Brain {
   Perception perception_;
   LootValuer loot_;
   LootChoice loot_choice_;
+  SquadBrain squad_;
+  SquadDirective squad_directive_;
 
   float plan_fast_secs_ = 0.08f;
   float plan_slow_secs_ = 0.20f;

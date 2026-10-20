@@ -17,6 +17,7 @@ const char* to_string(ActionKind k) {
     case ActionKind::Flee: return "Flee";
     case ActionKind::ThirdParty: return "ThirdParty";
     case ActionKind::HoldAngle: return "HoldAngle";
+    case ActionKind::Revive: return "Revive";
   }
   return "?";
 }
@@ -123,6 +124,11 @@ float Brain::score(ActionKind k, const WorldSnapshot& w) const {
       return s;
     }
 
+    case ActionKind::Revive:
+      // Never scored: a revive is a squad override, not a utility choice. Keeping it
+      // out of the candidate list means the argmax cannot pick it on its own.
+      return 0.f;
+
     case ActionKind::HoldAngle: {
       if (engaged || w.enemies_within_30m <= 0) return 0.f;
       float s = 0.30f * (0.3f + p.patience);
@@ -187,12 +193,28 @@ Decision Brain::make_intent(ActionKind a, const WorldSnapshot& w) {
     case ActionKind::Idle:
       d.move_to = w.self_pos;
       break;
+    case ActionKind::Revive:
+      if (squad_directive_.should_revive) d.move_to = squad_directive_.revive_at;
+      else d.move_to = w.self_pos;
+      break;
   }
   return d;
 }
 
 Decision Brain::think(const WorldSnapshot& w) {
   const bool combat_now = in_combat(w);
+
+  // Squad pass first: it shapes which target to fight and whether a revive outranks
+  // everything else. With no teammates in the snapshot this is a no-op, so solo
+  // behaviour is bit-for-bit unchanged.
+  std::vector<int> visible_ids;
+  if (!w.teammates.empty()) {
+    for (const auto& t : perception_.targets())
+      if (t.visible) visible_ids.push_back(t.id);
+  }
+  squad_directive_ = squad_.update(w.teammates, visible_ids, w.self_pos,
+                                   health_fraction(w), combat_now, w.enemies_pushing_me,
+                                   w.now_ms);
 
   // Between plan beats the bot is committed. This is the main difference
   // between human cadence and 60Hz utility spam.
@@ -266,6 +288,22 @@ Decision Brain::think(const WorldSnapshot& w) {
   // world origin: live bots walked at the corner of the map on ~12% of ticks
   // while committed ticks were fine, which is why it read as an intermittent
   // movement bug instead of a missing call.
+  // A revive outranks any combat or loot plan: it is a timer, and the squad layer
+  // already decided the fight is not on top of the body. This is the one case where
+  // a squad changes the action rather than shaping it.
+  if (squad_directive_.should_revive) {
+    Decision revive = make_intent(ActionKind::Revive, w);
+    revive.reason = "revive squadmate";
+    revive.score = best.score;
+    revive.scores = std::move(best.scores);
+    // Not committed to the revive action kind: the bot is walking to a body, and the
+    // next plan beat re-evaluates whether the body is still down.
+    last_action_ = ActionKind::Revive;
+    last_score_ = best.score;
+    has_decided_ = true;
+    return revive;
+  }
+
   Decision planned = make_intent(best.action, w);
   planned.score = best.score;
   planned.scores = std::move(best.scores);

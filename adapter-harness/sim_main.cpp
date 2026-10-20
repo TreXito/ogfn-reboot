@@ -19,6 +19,7 @@
 // Brain types for the assertions (placing pieces, reporting goals).
 #include "ogfn/ogfn_bots.h"
 #include "stubs/FortPickup.h"
+#include "stubs/FortPlayerStateAthena.h"
 using namespace ogfn;
 
 #include <cstdio>
@@ -40,7 +41,7 @@ namespace OgfnBot { void TestClearBurstState(size_t i); void TestSetLadder(float
                   void TestStrafeStats(size_t i, int* total, int* forward);
                   void TestClearBuildLog(); std::vector<std::pair<int,int>> TestBuildLog();
                   void TestForceLoot(); int TestLootSeen(size_t); bool TestLootClassSeen(size_t, ItemClass);
-                  bool TestLootChoice(size_t, int*, float*, float*); } // adapter (OGFN_HARNESS)
+                  bool TestLootChoice(size_t, int*, float*, float*); int TestSquadmateCount(size_t); } // adapter (OGFN_HARNESS)
 
 static int g_failures = 0;
 #define EXPECT(cond, msg) do { \
@@ -471,6 +472,45 @@ int main()
 		std::printf("  [P11] loot choice: want=%d at (%.0f,%.0f)\n", (int)want, px, py);
 		EXPECT(want, "with shields down and a big pot nearby, the bot wants it");
 		EXPECT(px != 0.f || py != 0.f, "and the destination is a real position, not the origin");
+	}
+
+	// ---------- P12: a squadmate is never a target ----------
+	// Bots on a solo playlist each get their own team, so this path is dormant live.
+	// The moment the playlist is duo/squad, a bot that treats its own squadmate as an
+	// enemy shoots its team, which is the worst tell in the game. Prove the split.
+	std::printf("\n-- P12: squadmate is split out and never targeted --\n");
+	{
+		world.ND->Connections.v.clear();
+		EnemyPawn->bDestroyed = true;
+		Harness::g_wallUp = false;
+		P0->Shield = 100.f;
+		P0->Health = 100.f;
+		OgfnBot::TestSetLadder(90000.f, 45000.f, 30000.f);
+		P0->Location = FVector(90400.f, 45000.f, 100.f);
+		P0->Rotation.Yaw = 0.f;
+		P0->lastRotation.Yaw = 0.f;
+
+		// Give bot0 and bot1 the SAME team; leave the rest as they are.
+		auto* TeamPS0 = new AFortPlayerStateAthena();
+		TeamPS0->TeamByte = 3;
+		Cast<AFortPlayerController>(AllPlayerBotsToTick[0].Controller)->PS = TeamPS0;
+		if (AFortPlayerPawnAthena::s_pawns.size() > 1 && AllPlayerBotsToTick.size() > 1)
+		{
+			auto* TeamPS1 = new AFortPlayerStateAthena();
+			TeamPS1->TeamByte = 3;
+			auto* PC1 = Cast<AFortPlayerController>(AllPlayerBotsToTick[1].Controller);
+			if (PC1) PC1->PS = TeamPS1;
+			// Put bot1 right in front of bot0, well within FOV and weapon range.
+			AllPlayerBotsToTick[1].Pawn->Location = P0->Location + FVector(500.f, 0.f, 0.f);
+			AllPlayerBotsToTick[1].Pawn->bDestroyed = false;
+		}
+
+		const int fireBefore = P0->fireCount;
+		TickFor(3.0);
+		std::printf("  [P12] bot0 fired %d times with a squadmate at 5m\n",
+			P0->fireCount - fireBefore);
+		EXPECT(OgfnBot::TestSquadmateCount(0) >= 1, "the teammate is recognised as a squadmate");
+		EXPECT(P0->fireCount == fireBefore, "and bot0 does not shoot its own squadmate");
 	}
 
 	// ---------- summary ----------

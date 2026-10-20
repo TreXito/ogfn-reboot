@@ -24,6 +24,7 @@
 #include "bots.h"
 #include "FortGameModeAthena.h"
 #include "FortGameStateAthena.h"
+#include "FortPlayerStateAthena.h"
 #include "FortSafeZoneIndicator.h"
 #include "FortWorldItemDefinition.h"
 #include "FortPickup.h"
@@ -60,6 +61,7 @@ void TestClearBuildLog();
 std::vector<std::pair<int, int>> TestBuildLog();
 // Behavior-sim hooks: loot telemetry (samples seen, classes seen, the live choice).
 void TestForceLoot();
+int TestSquadmateCount(size_t i);
 int TestLootSeen(size_t i);
 bool TestLootClassSeen(size_t i, ogfn::ItemClass cls);
 bool TestLootChoice(size_t i, int* pickupId, float* x, float* y);
@@ -99,6 +101,9 @@ namespace
 		                            // killed bots do (wave must NOT resurrect them)
 		bool bElimLogged = false;   // one ELIMINATED line per bot
 		bool bStormEvac = false;    // emergency storm extract done
+		// Same team this tick (empty on solo playlists). Stored loose because EnemyPawn
+		// is declared after Mind; only the pawn and its id are used.
+		std::vector<std::pair<int, AFortPlayerPawnAthena*>> squadmates;
 		int buildCount = 0;         // pieces placed (evidence that building is wired)
 		// Strafe evidence, classified where yaw-to-target is known: of the steps taken
 		// while the movement layer says "strafing", how many actually went across the
@@ -198,6 +203,7 @@ namespace
 	{
 		int id = 0;
 		AFortPlayerPawnAthena* pawn = nullptr;
+		AFortPlayerController* controller = nullptr;   // for squad/team resolution
 	};
 
 	// UNIT CONTRACT: the brain speaks METERS (perception max_range=90, tests place
@@ -960,6 +966,24 @@ namespace
 		W.enemies_within_30m = enemiesSeenWithin30;
 		W.enemies_currently_fighting_each_other = 0; // needs damage observation, next pass
 
+		// Squad context for the brain. Downed state is not read: the fork has no revive
+		// plumbing on 3.5, so teammates are reported alive and standing. Focus fire and
+		// spacing work regardless, and revive turns on the moment the engine exposes it.
+		W.teammates.clear();
+		for (auto& Mate : M.squadmates)
+		{
+			if (!PawnUsable(Mate.second))
+				continue;
+			ogfn::Teammate T;
+			T.id = Mate.first;
+			T.pos = ToVec(Mate.second->GetActorLocation());
+			T.health = Mate.second->GetHealth() + Mate.second->GetShield();
+			T.downed = false;
+			W.teammates.push_back(T);
+		}
+		W.now_ms = (uint64_t)(Now * 1000.0);
+		W.enemies_pushing_me = false;   // no damage events wired on this build yet
+
 		auto* Target = M.brain.perception().nearest(true);
 		if (Target)
 		{
@@ -1331,6 +1355,14 @@ void TickAll()
 	static std::vector<EnemyPawn> Enemies;
 	Enemies.clear();
 	Enemies.reserve(bots.size() + 4);
+
+	// Every other pawn in the match, resolved per bot further down: on a solo playlist
+	// every bot is its own team, but on a duo/squad playlist a bot that treats a
+	// teammate as an enemy shoots its own squad, which is the worst possible tell.
+	static std::vector<EnemyPawn> Others;
+	Others.clear();
+	Others.reserve(bots.size() + 4);
+
 	if (bCombat)
 	{
 		for (auto& Bot : bots)
@@ -1339,7 +1371,7 @@ void TickAll()
 				continue;
 			auto P = Cast<AFortPlayerPawnAthena>(Bot.Controller->GetPawn());
 			if (PawnUsable(P))
-				Enemies.push_back({ PawnId(P), P });
+				Others.push_back({ PawnId(P), P, Bot.Controller });
 		}
 		auto NetDriver = World->GetNetDriver();
 		if (NetDriver)
@@ -1351,8 +1383,9 @@ void TickAll()
 				if (!PC || !PC->IsValidLowLevel())
 					continue;
 				auto HumanPawn = Cast<AFortPlayerPawnAthena>(PC->GetMyFortPawn());
-				if (PawnUsable(HumanPawn))
-					Enemies.push_back({ PawnId(HumanPawn), HumanPawn });
+				if (!PawnUsable(HumanPawn))
+					continue;
+				Others.push_back({ PawnId(HumanPawn), HumanPawn, PC });
 			}
 		}
 
@@ -1390,6 +1423,30 @@ void TickAll()
 		}
 
 		Mind& M = g_minds[i];
+		// Split the others into enemies and squadmates for THIS bot. Only split when
+		// both team ids are known: an unknown team on either side falls through to
+		// enemy, because failing to shoot is recoverable and failing to recognise
+		// your own squadmate is not.
+		Enemies.clear();
+		M.squadmates.clear();
+		{
+			auto TeamOf = [](AFortPlayerController* PC) -> int
+			{
+				if (!PC)
+					return -1;
+				auto PS = Cast<AFortPlayerStateAthena>(PC->GetPlayerState());
+				if (!PS || !PS->IsValidLowLevel())
+					return -1;
+				return (int)PS->GetTeamIndex();
+			};
+			const int SelfTeam = TeamOf(Controller);
+			for (auto& Other : Others)
+				if (SelfTeam >= 0 && TeamOf(Other.controller) == SelfTeam)
+					M.squadmates.emplace_back(PawnId(Other.pawn), Other.pawn);
+				else
+					Enemies.push_back(Other);
+		}
+
 		// COMBAT-PHASE only: on the island every bot is alive, and marking them
 		// seen-alive there made the death gate treat all 45 burst victims as
 		// killed bots -- the rescue wave skipped every one of them (live match 1:
@@ -1961,6 +2018,10 @@ void TestStrafeStats(size_t i, int* total, int* forward) {
 		*total = g_minds[i].strafeSteps;
 		*forward = g_minds[i].strafeForward;
 	}
+}
+
+int TestSquadmateCount(size_t i) {
+	return i < g_minds.size() ? (int)g_minds[i].squadmates.size() : 0;
 }
 
 void TestForceLoot() {

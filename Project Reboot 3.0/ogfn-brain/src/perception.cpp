@@ -29,6 +29,11 @@ void Perception::update(const Observation& obs, double now) {
   for (auto& t : targets_) t.visible = false;
 
   for (const auto& e : obs.enemies) {
+    // Teammates are seen but never tracked as targets. Dropping them here rather
+    // than at the aiming call means no downstream consumer can accidentally treat
+    // one as fightable, which is the failure mode that makes a squad bot kill its
+    // own squad.
+    if (e.is_teammate) continue;
     const float dist = length(e.pos - obs.self_pos);
     const bool sensed = e.line_of_sight && dist <= cfg_.max_range &&
                         in_fov(obs.self_pos, obs.self_yaw_deg, e.pos, cfg_.fov_half_deg);

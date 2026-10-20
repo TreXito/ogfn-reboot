@@ -4,6 +4,8 @@
 namespace ogfn {
 
 // Number of entries in Persona::bias, keeps it in step with enum ActionKind.
+// One more than the number of ActionKind entries the brain scores (Revive is a
+// squad override, never a scored candidate).
 constexpr int kActionCount = 9;
 
 // A bot's skill is a point in a population distribution, not a difficulty slider.

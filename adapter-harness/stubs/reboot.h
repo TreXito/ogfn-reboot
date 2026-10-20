@@ -259,6 +259,8 @@ struct AFortInventory : UObject
 
 struct AFortPlayerController : UObject
 {
+	UObject* PS = nullptr;
+	UObject* GetPlayerState() { return PS; }
 	// Static on the base class, exactly where the real fork declares it
 	// (FortPlayerController.h). The counter rides along for sim evidence.
 	static inline int equipCalls = 0;

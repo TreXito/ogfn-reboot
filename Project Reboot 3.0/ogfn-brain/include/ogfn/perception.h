@@ -12,6 +12,10 @@ struct EnemySample {
   Vec3 pos;
   float health = 100.f;
   bool line_of_sight = false;
+  // A teammate is not an enemy. Without this flag a bot in a squad playlist would
+  // track, lock onto and shoot the person standing next to it, which is the single
+  // worst tell in the game (and in the current adapter, bots do share teams).
+  bool is_teammate = false;
 };
 
 struct Observation {
@@ -33,6 +37,7 @@ struct TrackedTarget {
   int id = 0;
   Vec3 last_seen_pos;
   bool visible = false;
+  bool is_teammate = false;
   float health = 100.f;
   double last_seen_time = -1e9;
   float tracked_for = 0.f;  // consecutive visible seconds
