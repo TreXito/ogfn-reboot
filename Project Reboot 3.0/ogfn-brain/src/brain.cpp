@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace ogfn {
 
@@ -222,8 +223,16 @@ Decision Brain::think(const WorldSnapshot& w) {
     return d;
   }
 
-  best.reason = "plan";
-  return best;
+  // The plan path must build the intent too. Returning `best` raw leaves
+  // move_to at the default (0,0,0), so every plan beat sends the bot to the
+  // world origin: live bots walked at the corner of the map on ~12% of ticks
+  // while committed ticks were fine, which is why it read as an intermittent
+  // movement bug instead of a missing call.
+  Decision planned = make_intent(best.action, w);
+  planned.score = best.score;
+  planned.scores = std::move(best.scores);
+  planned.reason = "plan";
+  return planned;
 }
 
 }  // namespace ogfn

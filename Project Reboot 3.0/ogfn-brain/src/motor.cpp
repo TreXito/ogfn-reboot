@@ -4,10 +4,24 @@
 
 namespace ogfn {
 
+void Motor::tick(float dt) {
+  if (dt <= 0.f) return;
+  if (reloading_) {
+    reload_remaining_ -= dt;
+    if (reload_remaining_ <= 0.f) {
+      reloading_ = false;
+      rounds_left_ = weapon_.mag_size;
+    }
+  }
+}
+
 MotorOutput Motor::aim_at(const Vec3& self_pos, float current_yaw, const Vec3& target_pos,
                           bool fire, float dt) {
   MotorOutput out;
   if (dt <= 0.f) return out;
+
+  // Reload time passes whether or not the bot is aiming this tick.
+  tick(dt);
 
   // Aim at the upper chest, not the head: humans aim at mass.
   Vec3 aim_point = target_pos;
@@ -45,7 +59,30 @@ MotorOutput Motor::aim_at(const Vec3& self_pos, float current_yaw, const Vec3& t
   // discipline: nobody holds the trigger for a whole magazine at 60 metres.
   const float tolerance = lerpf(6.5f, 2.0f, persona_.aim_skill);
   const float dist = length(target_pos - self_pos);
-  out.firing = fire && last_aim_error_deg_ < tolerance && trigger_discipline(dist, dt);
+  bool on_target = fire && last_aim_error_deg_ < tolerance;
+
+  // Magazine. Holding the trigger must eventually run dry, and a dry gun means
+  // the trigger does nothing until the reload finishes. Humans also reload in
+  // the gaps instead of waiting to be caught empty, so a bot with a quiet second
+  // tops up.
+  if (reloading_) {
+    on_target = false;
+  } else if (on_target) {
+    if (rounds_left_ <= 0) {
+      begin_reload();
+      on_target = false;
+    } else if (trigger_discipline(dist, dt)) {
+      --rounds_left_;
+    } else {
+      on_target = false;
+    }
+  } else if (!fire && rounds_left_ * 2 < weapon_.mag_size && rng_.unit() < dt * 0.6f) {
+    // Top up in the quiet moments, the way people do, not only when dry. The
+    // half-mag threshold is the habit: someone with a full-ish gun keeps moving.
+    begin_reload();
+  }
+
+  out.firing = on_target && !reloading_;
   out.move_yaw_deg = desired_yaw;
   out.moving = true;
   return out;
@@ -74,6 +111,15 @@ bool Motor::trigger_discipline(float distance, float dt) {
   return burst_phase_ < burst_cycle_ * duty;
 }
 
+void Motor::begin_reload() {
+  if (reloading_) return;
+  reloading_ = true;
+  ++reload_count_;
+  // Reload time varies a little: a person is not a metronome, and a reload that
+  // is cut short by being pushed is the normal case, not the exception.
+  reload_remaining_ = weapon_.reload_secs * rng_.range(0.92f, 1.15f);
+}
+
 int Motor::flick_ticks_to_land(const Vec3& self_pos, float start_yaw, const Vec3& target_pos) {
   const float dt = 1.f / 60.f;
   float yaw = start_yaw;
@@ -87,6 +133,7 @@ int Motor::flick_ticks_to_land(const Vec3& self_pos, float start_yaw, const Vec3
 
 MotorOutput Motor::idle_look(float current_yaw, float dt) {
   MotorOutput out;
+  tick(dt);  // a reload finishes while the bot is scanning, as it should
   // Sweep, pause, sweep back. Occasionally glance 90 degrees off axis so bots
   // appear to check their flanks like a person would.
   if (rng_.unit() < dt * 0.15f) idle_scan_dir_ = -idle_scan_dir_;

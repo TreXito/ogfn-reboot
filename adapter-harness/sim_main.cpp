@@ -327,6 +327,60 @@ int main()
 	EXPECT(P0->Location.Y > 43000.f && P0->Location.Y < 47000.f, "evac lands near final ring center Y");
 	EXPECT(P0->Location.Z >= 0.f && P0->Location.Z < 300.f, "evac pawn ends on the ground");
 
+	// ---------- P9: movement model reaches the pawn ----------
+	// The motor had jumping/crouching fields nothing set, so ApplyJump was dead
+	// code (jumpCount stayed 0 in every run). Locomotion owns them now. The walk
+	// is kinematic here (teleport steps, no AddMovementInput), so the evidence is
+	// the DISPLACEMENT: engaged bots must move across the enemy line, not straight
+	// at the circle the way a stationary duellist would.
+	std::printf("\n-- P9: movement model (strafe + jump reach the pawn) --\n");
+	{
+		world.ND->Connections.v.clear();
+		world.ND->Connections.v.push_back(HumanConn);   // P3 cleared it; the enemy is this pawn
+		EnemyPawn->bDestroyed = false;
+		// Move bot0 out of the storm-evac pile first: P8 stacks the fleet inside
+		// the final ring and the swept-teleport capsule collision then blocks every
+		// step, which would make this scenario test the pile, not the movement.
+		// Inside the final ring (center 90000/45000, r=625 from P8) but off the
+		// evac pile, so the bot is not storm-driven and Engage can win.
+		const FVector OpenGround(90000.f + 300.f, 45000.f - 300.f, 100.f);
+		P0->Location = OpenGround;
+		EnemyPawn->Location = OpenGround + FVector(600.f, 0.f, 0.f);  // 6 m ahead: unambiguous Engage
+		P0->Health = 25.f;   // hurt: bail-out jump is on the table
+		P0->Shield = 0.f;    // hp fraction is (hp+shield)/200, so a full shield
+		                     // would read as healthy and suppress the bail-out
+		TickFor(1.0);        // let perception re-acquire through the FOV cone
+
+		const int jumpsBefore = P0->jumpCount;
+		const int telBefore = P0->teleportCount;
+		int lateralSteps = 0, forwardSteps = 0;
+		FVector prev = P0->Location;
+		// The sim ticks at 30Hz and TickFor truncates, so step in sim ticks:
+		// TickFor(1/60) yields ZERO iterations, which silently makes a loop a no-op.
+		for (int i = 0; i < 30 * 12; ++i)
+		{
+			TickFor(1.0 / 30.0);
+			const FVector now = P0->Location;
+			const float dx = now.X - prev.X, dy = now.Y - prev.Y;
+			const float len = std::sqrt(dx * dx + dy * dy);
+			prev = now;
+			if (len < 1.f)
+				continue;
+			// Enemy sits at +X from bot0, so a step toward it is ~(1,0) and a
+			// strafe is ~(0,+-1).
+			if (std::fabs(dx / len) < 0.6f) ++lateralSteps;
+			else ++forwardSteps;
+		}
+		EXPECT(P0->jumpCount > jumpsBefore, "a cornered hurt bot sends Jump to the pawn");
+		std::printf("  [P9] steps lateral=%d forward=%d jumps=%d teleports=%d pos=(%.0f,%.0f,%.0f)\n",
+			lateralSteps, forwardSteps, P0->jumpCount - jumpsBefore,
+			P0->teleportCount - telBefore,
+			P0->Location.X, P0->Location.Y, P0->Location.Z);
+		EXPECT(lateralSteps + forwardSteps > 0, "the bot is moving under its own decisions");
+		EXPECT(lateralSteps > forwardSteps,
+		       "engaged movement is mostly across the enemy line, not straight at it");
+	}
+
 	// ---------- summary ----------
 	std::printf("\n=== summary ===\n");
 	std::printf("  pawn0: rot=%d move=%d jump=%d fire=%d firstFire=%.2fs\n",

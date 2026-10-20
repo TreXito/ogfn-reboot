@@ -66,6 +66,9 @@ namespace
 		ogfn::Persona persona;
 		ogfn::Brain brain;
 		ogfn::Motor motor;
+		// Movement model: strafe/crouch/jump/fall. MotorOutput.jumping existed but
+		// nothing ever set it, so ApplyJump was dead code (harness jump=0 forever).
+		ogfn::Locomotion loco;
 		ogfn::Decision decision;
 		bool bSeeded = false;
 		bool bArmed = false;
@@ -84,7 +87,7 @@ namespace
 		double nextLandTry = 0.0;   // retry clock for a rejected ground probe
 		double lastTick = 0.0;
 
-		Mind() : persona(), brain(persona, 1), motor(persona, 1) {}
+		Mind() : persona(), brain(persona, 1), motor(persona, 1), loco(persona, 1) {}
 
 		void Reseed(uint64_t seed, float skillBias)
 		{
@@ -92,6 +95,10 @@ namespace
 			persona = ogfn::Persona::sample(rng, skillBias);
 			brain = ogfn::Brain(persona, seed);
 			motor = ogfn::Motor(persona, seed);
+			// Rifle-ish profile: 30 rounds, honest reload. The motor needs a magazine
+			// or the trigger is a hose (bench caught 5.4s continuous fire).
+			motor.set_weapon(ogfn::WeaponProfile(30, 2.6f));
+			loco = ogfn::Locomotion(persona, seed ^ 0x51ED270Bull);
 		}
 	};
 
@@ -101,6 +108,8 @@ namespace
 	float g_ladderCX = 0.f, g_ladderCY = 0.f, g_ladderR = 0.f; // uu, innermost ring >0
 	int g_ladderTries = 0;
 	bool g_summaryLogged = false;
+	bool g_traceFnReady = true;        // Kismet traces are live once combat resolves
+	bool g_lastStepBlocked = false;    // last kinematic step was swept into geometry
 	UFunction* g_moveCompSetModeFn = nullptr;   // resolved once at combat gate
 
 	// Runtime-resolved engine verbs (names differ per client build; resolve once,
@@ -1498,6 +1507,54 @@ void TickAll()
 
 		ApplyRotation(Pawn, Out.pitch_deg, Out.yaw_deg);
 
+		// Movement model. Feeds the strafe/crouch/jump layer real ground truth:
+		// whether the capsule is falling and how fast, whether there is a wall
+		// within arm's reach to peek from, and whether the floor is a slope.
+		// velZ came from the movement component; it is frozen by the engine bug,
+		// so a fall is detected from the ground probe instead (see below).
+		const bool bEngaged = M.decision.action == ogfn::ActionKind::Engage
+			|| M.decision.action == ogfn::ActionKind::Build;
+		const float YawToTarget = Target
+			? ogfn::yaw_between(W.self_pos, Target->last_seen_pos)
+			: W.self_yaw_deg;
+		const float HpFrac = ogfn::clampf((W.self_health + W.self_shield) / 200.f, 0.f, 1.f);
+		ogfn::MoveState LocoState;
+		{
+			// Cover probe: a short trace chest-height toward the strafe side tells
+			// the peek cycle whether there is something to duck behind. One trace
+			// only, and only while engaged, so the island costs nothing.
+			LocoState.has_cover = false;
+			if (bEngaged && g_traceFnReady)
+			{
+				const float Side = M.loco.strafe_sign() * 90.f; // 1.5 m to the side
+				const FVector From = Pawn->GetActorLocation() + FVector(0.f, 0.f, 60.f);
+				const FVector To = From + FVector(
+					std::cos(ogfn::deg2rad(W.self_yaw_deg + Side)) * 150.f,
+					std::sin(ogfn::deg2rad(W.self_yaw_deg + Side)) * 150.f, 0.f);
+				FHitResult* CH = nullptr;
+				UKismetSystemLibrary::LineTraceSingle(Pawn, From, To,
+					ETraceTypeQuery::TraceTypeQuery1, false, TArray<AActor*>(),
+					EDrawDebugTrace::None, true, FLinearColor(), FLinearColor(), 0.f, &CH);
+				LocoState.has_cover = CH && CH->IsBlockingHit();
+			}
+			// CharMoveComp never ticks here, so airborne/vertical speed are not
+			// observable: report grounded, and let the jump gate do the pacing.
+			LocoState.airborne = false;
+			LocoState.vertical_speed = 0.f;
+			LocoState.on_slope = g_lastStepBlocked; // uphill/stuck reads as slope work
+		}
+		const ogfn::MoveOutput Move = M.loco.update(dt, W.self_yaw_deg, YawToTarget,
+			W.target_distance, bEngaged, Out.firing, M.motor.reloading(), HpFrac, LocoState);
+#ifdef OGFN_SIM_TRACE
+		if (&M == &g_minds[0] && (int)(Now * 10.0) % 6 == 0)
+		{
+			std::printf("[sim] loco t=%.2f engaged=%d strafing=%d speed=%.2f crouch=%d jump=%d brace=%d cover=%d yaw2tgt=%.1f\n",
+				Now, (int)bEngaged, (int)Move.strafing, Move.speed_scale,
+				(int)Move.crouching, (int)Move.jumping, (int)Move.bracing,
+				(int)LocoState.has_cover, YawToTarget);
+		}
+#endif
+
 		// KINEMATIC LOCOMOTION on circle-intent decisions (make_intent fills
 		// move_to for Engage/Flee/RotateToCircle). CharacterMovement does not
 		// tick on this build (30/s AddMovementInput for minutes with velocity
@@ -1510,14 +1567,37 @@ void TickAll()
 			|| M.decision.action == ogfn::ActionKind::Engage
 			|| M.decision.action == ogfn::ActionKind::Flee)
 		{
+			// While engaged the heading comes from the movement layer, not from
+			// move_to: a bot that walks straight at the circle while shooting is
+			// the "stands still in a fight" tell. Move.strafing means the heading
+			// is perpendicular to the target, and speed_scale caps how fast a
+			// human crosses their own crosshair.
 			const ogfn::Vec3& To = M.decision.move_to;
-			float mx = To.x - W.self_pos.x;
-			float my = To.y - W.self_pos.y;
-			float mlen = std::sqrt(mx * mx + my * my);
-			if (mlen > kMoveMinDist)
+			float dirx, diry;
+			if (Move.strafing)
 			{
-				float dirx = mx / mlen, diry = my / mlen;
-				float step = kBotWalkSpeed * dt; // engine uu per tick
+				const ogfn::Vec3 d = ogfn::yaw_to_dir(Move.move_yaw_deg);
+				dirx = d.x; diry = d.y;
+			}
+			else
+			{
+				float mx = To.x - W.self_pos.x;
+				float my = To.y - W.self_pos.y;
+				float mlen = std::sqrt(mx * mx + my * my);
+				if (mlen <= kMoveMinDist)
+				{
+					dirx = 0.f; diry = 0.f;
+				}
+				else
+				{
+					dirx = mx / mlen; diry = my / mlen;
+				}
+			}
+			if (dirx != 0.f || diry != 0.f)
+			{
+				float step = kBotWalkSpeed * dt * ogfn::clampf(Move.speed_scale, 0.f, 1.f);
+				if (step <= 0.f)
+					step = kBotWalkSpeed * dt * 0.35f; // crouched/bracing still creeps
 				FVector Cur = Pawn->GetActorLocation();
 				FVector Want(Cur.X + dirx * step, Cur.Y + diry * step, Cur.Z);
 
@@ -1564,14 +1644,21 @@ void TickAll()
 					auto NowPos = Pawn->GetActorLocation();
 					float moved = std::fabs((float)NowPos.X - StepX0) + std::fabs((float)NowPos.Y - StepY0);
 					if (moved > 0.5f)
+					{
 						M.stepOk++;
+						g_lastStepBlocked = false;
+					}
 					else
+					{
 						M.stepBlk++;
+						g_lastStepBlocked = true;
+					}
 				}
 			}
 		}
 
-		if (Out.jumping)
+		// The movement layer owns jumping now; MotorOutput.jumping was never set.
+		if (Move.jumping)
 			ApplyJump(Pawn);
 
 		if (Out.firing)
