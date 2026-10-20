@@ -103,6 +103,15 @@ namespace
 		bool bStormEvac = false;    // emergency storm extract done
 		// Same team this tick (empty on solo playlists). Stored loose because EnemyPawn
 		// is declared after Mind; only the pawn and its id are used.
+		// Vertical aim is motor state now: the motor owns pitch and returns the corrected
+		// value, so the adapter has to remember it between ticks (it used to leave
+		// pitch at 0 forever, which is what made every bot stare at the horizon).
+		float pitch = 0.f;
+		// Previous target position, for velocity: without it a bot cannot lead, and a
+		// bot that hits where you WERE is the clearest aimbot signature there is.
+		ogfn::Vec3 last_target_pos{};
+		double last_target_time = -1.0;
+		bool has_last_target = false;
 		std::vector<std::pair<int, AFortPlayerPawnAthena*>> squadmates;
 		int buildCount = 0;         // pieces placed (evidence that building is wired)
 		// Strafe evidence, classified where yaw-to-target is known: of the steps taken
@@ -1793,9 +1802,36 @@ void TickAll()
 
 		// Motor every tick: aim tracking with servo degradation, or idle scanning.
 		auto* Target = M.brain.perception().nearest(true);
+		// Target velocity, measured from the pawn's own movement over the last tick.
+		// Engine uu -> brain meters, and clamped: a velocity spike from a teleport or a
+		// respawn must not fling the aim point across the map.
+		ogfn::TargetMotion Motion;
+		if (Target)
+		{
+			if (M.has_last_target && Now > M.last_target_time)
+			{
+				const float era = static_cast<float>(Now - M.last_target_time);
+				ogfn::Vec3 v = (Target->last_seen_pos - M.last_target_pos) * (1.f / era);
+				const float speed = ogfn::length(v);
+				if (speed > 30.f) v = v * (30.f / speed);   // 30 m/s is already generous
+				Motion = ogfn::TargetMotion(v);
+			}
+			M.last_target_pos = Target->last_seen_pos;
+			M.last_target_time = Now;
+			M.has_last_target = true;
+		}
+		else
+		{
+			M.has_last_target = false;
+		}
+
 		ogfn::MotorOutput Out = Target
-			? M.motor.aim_at(W.self_pos, W.self_yaw_deg, Target->last_seen_pos, M.decision.fire, dt)
-			: M.motor.idle_look(W.self_yaw_deg, dt);
+			? M.motor.aim_at(W.self_pos, W.self_yaw_deg, M.pitch, Target->last_seen_pos,
+			                 M.decision.fire, dt, Motion)
+			: M.motor.idle_look(W.self_yaw_deg, M.pitch, dt);
+		// Carry the motor's vertical aim forward: this is the state that did not exist.
+		if (Out.pitch_deg == Out.pitch_deg)   // NaN guard
+			M.pitch = Out.pitch_deg;
 
 #ifdef OGFN_SIM_TRACE
 		if (&M == &g_minds[0] && (int)(Now * 10.0) % 6 == 0)

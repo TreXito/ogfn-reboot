@@ -94,6 +94,9 @@ class Brain {
  public:
   Brain(Persona p, uint64_t seed)
       : persona_(p), rng_(seed), loot_(p, seed ^ 0x10077ull), squad_(seed ^ 0x5C0ADull) {
+    // A fixed rotation side: the ring entry angle this bot prefers for the whole match.
+    Rng habit(seed ^ 0x2074A710Bull);
+    rotation_offset_rad_ = habit.range(0.f, 2.f * kPi);
     // Re-plan cadence: impatient bots re-evaluate quicker, patient ones settle.
     plan_fast_secs_ = lerpf(0.09f, 0.06f, p.patience);
     plan_slow_secs_ = lerpf(0.24f, 0.12f, p.patience);
@@ -141,6 +144,9 @@ class Brain {
   Persona persona_;
   Rng rng_;
   Perception perception_;
+  // Fixed per bot: which side of the ring it prefers to rotate in on. Derived once
+  // from the seed so a bot's rotation line is a habit, not a per-tick coin flip.
+  float rotation_offset_rad_ = 0.f;
   LootValuer loot_;
   LootChoice loot_choice_;
   SquadBrain squad_;

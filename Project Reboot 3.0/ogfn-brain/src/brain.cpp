@@ -156,9 +156,28 @@ Decision Brain::make_intent(ActionKind a, const WorldSnapshot& w) {
       d.fire = true;
       break;
     case ActionKind::Flee:
-    case ActionKind::RotateToCircle:
-      d.move_to = Vec3(w.circle_next_center_x, w.circle_next_center_y, 0.f);
+    case ActionKind::RotateToCircle: {
+      // Rotating to the exact centre is a beeline, and a beeline is what every bot
+      // does when it has no idea where anyone is. Real players enter at an offset,
+      // aim for a spot inside the ring rather than its middle, and leave room for
+      // the fight they expect on the way in. The offset here is FIXED per bot
+      // (derived from its persona seed, not re-rolled per tick), so a bot's rotation
+      // line is consistent across a match the way a person's habits are.
+      const float ang = rotation_offset_rad_;
+      // 15-55% of the remaining radius off-centre, and always inside the ring.
+      const float frac = lerpf(0.15f, 0.55f, persona_.patience);
+      const float r = clampf(w.circle_radius * frac, 4.f, 120.f);
+      const float tx = w.circle_next_center_x + std::cos(ang) * r;
+      const float ty = w.circle_next_center_y + std::sin(ang) * r;
+      // Flee is different: run away from where the fight is, not to a nice spot.
+      if (a == ActionKind::Flee) {
+        d.move_to = Vec3(w.self_pos.x + std::cos(ang + kPi) * 30.f,
+                         w.self_pos.y + std::sin(ang + kPi) * 30.f, 0.f);
+      } else {
+        d.move_to = Vec3(tx, ty, 0.f);
+      }
       break;
+    }
     case ActionKind::Heal:
       d.build_wall = true;  // heal behind cover
       break;
@@ -251,6 +270,26 @@ Decision Brain::think(const WorldSnapshot& w) {
   }
   std::sort(best.scores.begin(), best.scores.end(),
             [](const auto& a, const auto& b) { return a.second > b.second; });
+
+  // Indecision. When two options are close, a person sometimes takes the second
+  // one: they were already leaning that way, or they misjudge which is better.
+  // A pure argmax never does this, and "always picks the maximum" is measurably
+  // detectable across a match (it is what made 64 bots agree on 72% of ticks).
+  // Bounded on purpose: only near-ties, never a clearly better option.
+  if (best.scores.size() >= 2) {
+    const float top = best.scores[0].second;
+    const float second = best.scores[1].second;
+    if (second > 0.f && (top - second) < top * 0.12f && rng_.unit() < 0.25f) {
+      // Take the runner-up, and record that it was a coin flip rather than a win.
+      for (ActionKind k : candidates) {
+        if (to_string(k) == best.scores[1].first) {
+          best.action = k;
+          best.score = second;
+          break;
+        }
+      }
+    }
+  }
 
   // Surprise handling. Only a change in combat involvement costs reaction time;
   // ordinary task changes are taken up at the next plan beat. One episode, fixed

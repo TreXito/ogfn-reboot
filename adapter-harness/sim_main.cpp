@@ -513,6 +513,34 @@ int main()
 		EXPECT(P0->fireCount == fireBefore, "and bot0 does not shoot its own squadmate");
 	}
 
+	// ---------- P13: the motor drives vertical aim and leads ----------
+	// pitch_deg was never written by the motor, so ApplyRotation always received 0
+	// and every bot stared at the horizon for a whole match. And without target
+	// velocity the bot cannot lead, so it shoots where the target WAS.
+	std::printf("\n-- P13: vertical aim + leading reach the pawn --\n");
+	{
+		world.ND->Connections.v.clear();
+		world.ND->Connections.v.push_back(HumanConn);
+		EnemyPawn->bDestroyed = false;
+		OgfnBot::TestSetLadder(90000.f, 45000.f, 30000.f);
+		P0->Location = FVector(90400.f, 45000.f, 100.f);
+		P0->Rotation.Yaw = 0.f;
+		P0->lastRotation.Yaw = 0.f;
+		// Target 20m ahead and 10m UP: the bot must pitch up at it.
+		EnemyPawn->Location = P0->Location + FVector(2000.f, 0.f, 1000.f);
+		P0->Health = 100.f;
+		P0->Shield = 100.f;
+		TickFor(1.0);
+		float maxPitch = 0.f;
+		for (int i = 0; i < 30 * 4; ++i)
+		{
+			TickFor(1.0 / 30.0);
+			maxPitch = std::max(maxPitch, std::fabs(P0->lastRotation.Pitch));
+		}
+		std::printf("  [P13] max pitch seen on the pawn: %.1f deg\n", maxPitch);
+		EXPECT(maxPitch > 5.f, "the motor drives vertical aim (pitch is no longer always 0)");
+	}
+
 	// ---------- summary ----------
 	std::printf("\n=== summary ===\n");
 	std::printf("  pawn0: rot=%d move=%d jump=%d fire=%d firstFire=%.2fs\n",

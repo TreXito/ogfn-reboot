@@ -16,6 +16,17 @@ struct WeaponProfile {
   WeaponProfile(int mag, float reload) : mag_size(mag), reload_secs(reload) {}
 };
 
+// Kinematic state of the thing being shot at, as the motor needs it. Without
+// velocity there is no lead, and a bot that never leads is the single clearest
+// aimbot signature there is: it always shoots where you WERE.
+struct TargetMotion {
+  Vec3 velocity;        // m/s, horizontal is what matters
+  Vec3 head_offset{0.f, 0.f, 0.55f};  // chest, relative to the reported position
+  bool valid = false;
+  TargetMotion() = default;
+  TargetMotion(Vec3 v) : velocity(v), valid(true) {}
+};
+
 // What the motor tells the engine to do this tick. Kept abstract so the same
 // motor can drive a real game client or a headless sim.
 struct MotorOutput {
@@ -61,15 +72,30 @@ class Motor {
   void tick(float dt);
 
   // Simulate one tick of the human-ish aiming pipeline toward a target.
+  //
+  // `current_pitch` is passed by value and the corrected pitch comes back on the
+  // output: the motor is the only thing that knows about vertical aim, and it used
+  // to never write pitch at all, so every bot stared dead level for a whole match.
+  // `motion` is optional; without it the bot cannot lead, which is a visible tell,
+  // so a caller that has velocity should always pass it.
+  MotorOutput aim_at(const Vec3& self_pos, float current_yaw, float current_pitch,
+                     const Vec3& target_pos, bool fire, float dt,
+                     const TargetMotion& motion = TargetMotion());
+
+  // Convenience for callers with no vertical state and no velocity (tests, tools).
   MotorOutput aim_at(const Vec3& self_pos, float current_yaw, const Vec3& target_pos,
-                     bool fire, float dt);
+                     bool fire, float dt) {
+    return aim_at(self_pos, current_yaw, 0.f, target_pos, fire, dt, TargetMotion());
+  }
 
   // Ticks (at 1/60) a flick from `from_deg` off target takes to land. Used by
   // tests to pin the turn rate inside the human range.
   int flick_ticks_to_land(const Vec3& self_pos, float start_yaw, const Vec3& target_pos);
 
-  // Idle scanning: humans look around, they do not stare down the axis.
-  MotorOutput idle_look(float current_yaw, float dt);
+  // Idle scanning: humans look around, they do not stare down the axis. Vertical
+  // drift is included because a player's view is not locked to the horizon.
+  MotorOutput idle_look(float current_yaw, float current_pitch, float dt);
+  MotorOutput idle_look(float current_yaw, float dt) { return idle_look(current_yaw, 0.f, dt); }
 
   // Build keypresses for this tick given how fast this bot actually plays.
   int build_inputs_this_tick(float dt);
@@ -79,6 +105,7 @@ class Motor {
   bool damage_reacts(double now, float damage);
 
   float aim_error_deg() const { return last_aim_error_deg_; }
+  float pitch_error_deg() const { return last_pitch_error_deg_; }
 
   // Trigger discipline: humans tap-fire at long range and hold the trigger up
   // close. Returns whether the trigger is down this tick. Distance-aware, so it
@@ -89,13 +116,25 @@ class Motor {
   Persona persona_;
   Rng rng_;
   float yaw_velocity_ = 0.f;      // deg/s, for the servo
+  float pitch_velocity_ = 0.f;
   float last_aim_error_deg_ = 0.f;
+  float last_pitch_error_deg_ = 0.f;
+  float recoil_pitch_ = 0.f;      // accumulated muzzle climb, decays between bursts
+  float settle_ = 0.f;            // 0..1, how settled the current track is
+  float idle_pitch_target_ = 0.f; // where the idle view wants to be vertically
   float jitter_phase_ = 0.f;
   float idle_scan_dir_ = 1.f;
   double damage_gate_until_ = -1e9;
   float build_accum_ = 0.f;
-  float burst_phase_ = 0.f;
-  float burst_cycle_ = 0.4f;
+  // Bursts are holds with their own sampled duration and phase, not a duty cycle.
+  bool in_burst_ = false;
+  float burst_len_ = 0.3f;
+  float burst_elapsed_ = 0.f;
+  float gap_left_ = 0.f;
+  int shots_fired_ = 0;
+  float burst_hold_frac_ = 1.f;
+  float burst_start_phase_ = 0.f;  // sub-tick start offset, so releases are not tick-quantised
+  bool trigger_held_ = false;  // hysteresis latch: held while roughly on target
 
   WeaponProfile weapon_{};
   int rounds_left_ = 30;
