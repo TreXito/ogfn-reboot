@@ -23,6 +23,16 @@ struct BuildInput {
   bool reset = false;       // human habit: reset the build selection between sets
 };
 
+// Why a piece was refused by the world, which is the only feedback the builder
+// gets and the reason it must not keep swinging at a wall it cannot place.
+enum class BuildRefusal {
+  None,
+  NoResource,     // out of wood/brick/steel
+  Blocked,        // the cell is occupied or the surface is not buildable
+  OutOfRange,     // too far, or inside the player
+  Unknown,
+};
+
 // Why a bot boxes up, in the order humans do it.
 enum class BuildGoal {
   None,
@@ -73,6 +83,14 @@ class Builder {
     plan_hold_secs_ = lerpf(2.6f, 1.3f, p.build_speed);
   }
 
+  // The engine reports the outcome of the last input it was given. Optional: a
+  // harness or a sim that never refuses anything can ignore it entirely, and the
+  // builder then behaves exactly as it did before.
+  //
+  // `repeat` means the same input was refused again, which is what turns a one-off
+  // mistake into evidence that the plan is wrong rather than unlucky.
+  void report_result(bool placed, BuildRefusal why);
+
   // Called every tick. Returns the single input to send this tick, or None.
   //
   // `taking_fire` should be true while damage is actually incoming. `wants_cover`
@@ -86,6 +104,12 @@ class Builder {
   // read this; "bot boxes up" is 4 walls + 1 roof, "bot ramps" is 2 to 4 pieces.
   int placed_in_goal() const { return placed_in_goal_; }
   int total_placed() const { return total_placed_; }
+  // Refusals seen, and how many plans were abandoned because of them. A builder that
+  // never learns its piece was refused keeps re-sending the same impossible input,
+  // which at 2 to 7 inputs a second is the loudest macro tell there is.
+  int refusals() const { return refusals_; }
+  int plans_abandoned() const { return plans_abandoned_; }
+  bool out_of_material() const { return out_of_material_; }
   int total_edits() const { return total_edits_; }
   int reset_count() const { return resets_; }
 
@@ -115,6 +139,15 @@ class Builder {
   double box_ready_ = 0.0;
   double peek_ready_ = 0.0;
   double push_ready_ = 0.0;
+
+  // Feedback state.
+  int refusals_ = 0;
+  int plans_abandoned_ = 0;
+  int consecutive_refusals_ = 0;
+  BuildRefusal last_refusal_ = BuildRefusal::None;
+  bool out_of_material_ = false;
+  double material_hold_until_ = 0.0;   // staying off building while the counter is empty
+  double abandon_hold_until_ = 0.0;    // beat of doing something else after giving up
 
   float accum_ = 0.f;      // input accumulator, so the cadence is honest
   float base_yaw_ = 0.f;   // heading the sequence was started at

@@ -16,6 +16,20 @@ const char* to_string(PieceKind p) {
 }
 
 namespace {
+// A bot whose piece was refused does not keep sending it. Two consecutive refusals
+// of the same kind is a plan that cannot work, not bad luck: at 4 inputs a second a
+// player would already have looked around and done something else. This is what
+// separates "it tried to build" from "it has no idea the wall is not there".
+constexpr int kRefusalsBeforeAbandon = 2;
+// Out of material is different from blocked: nothing about the plan is wrong, the
+// bot simply cannot build until it loots. It drops the plan immediately and stays
+// off building for a while, which is what a player does when the counter is empty.
+constexpr double kOutOfMaterialHold = 25.0;
+// After giving up on a plan, the bot does not immediately start another one. Without
+// this it abandoned and restarted 96 times in 30 seconds (97 inputs, worse than an
+// honest builder's 25), because "abandon" landed on the same tick as "want cover".
+// A player who cannot place a wall stops trying and does something else for a beat.
+constexpr double kAbandonHold = 1.6;
 // Fall back to the ground if nothing happens for this long: a bot that keeps
 // its build plan through a whole rotation is not reacting to the world.
 constexpr double kGoalTimeout = 6.0;
@@ -59,6 +73,50 @@ BuildPiece BuildGrid::place(PieceKind kind, const Vec3& self, float yaw_deg, int
   out.yaw_deg = yaw;
   out.valid = true;
   return out;
+}
+
+void Builder::report_result(bool placed, BuildRefusal why) {
+  if (placed) {
+    consecutive_refusals_ = 0;
+    last_refusal_ = BuildRefusal::None;
+    out_of_material_ = false;
+    return;
+  }
+  if (why == BuildRefusal::None) why = BuildRefusal::Unknown;
+  // A different reason than last time means the world changed, so it is new
+  // information and not yet a hopeless plan.
+  if (why != last_refusal_) consecutive_refusals_ = 1;
+  else ++consecutive_refusals_;
+  last_refusal_ = why;
+  ++refusals_;
+
+  if (why == BuildRefusal::NoResource) {
+    out_of_material_ = true;
+    material_hold_until_ = now_ + kOutOfMaterialHold;
+    if (goal_ != BuildGoal::None) {
+      goal_ = BuildGoal::None;
+      step_ = 0;
+      placed_in_goal_ = 0;
+      ++plans_abandoned_;
+    }
+    return;
+  }
+
+  // Blocked, out of range, or unknown: retry once (a piece can genuinely be
+  // refused by a moving player swapping cells under it), then give up on the plan
+  // rather than hammer the same impossible input at the bot's input rate.
+  if (consecutive_refusals_ >= kRefusalsBeforeAbandon && goal_ != BuildGoal::None) {
+    goal_ = BuildGoal::None;
+    step_ = 0;
+    placed_in_goal_ = 0;
+    ++plans_abandoned_;
+    // Escalating backoff: repeated failures in the same spot teach the bot to stop
+    // bothering for longer. 16 abandons in 30s was still churn; a player who cannot
+    // build somewhere gives up on that idea for the rest of the fight.
+    const double hold = kAbandonHold * static_cast<double>(consecutive_refusals_) *
+                        static_cast<double>(consecutive_refusals_);
+    abandon_hold_until_ = now_ + (hold > 12.0 ? 12.0 : hold);
+  }
 }
 
 void Builder::start_goal(BuildGoal g, float now) {
@@ -114,7 +172,13 @@ BuildInput Builder::update(float dt, bool wants_cover, bool taking_fire, float h
   const bool losing = health_frac < 0.35f;
 
   BuildGoal want = BuildGoal::None;
-  if (taking_fire || wants_cover) {
+  // Nothing to build with: a bot with an empty material counter does not wall up,
+  // it runs or fights. Keeping the goal here was the reason a bot with no wood
+  // stood still hammering a build input that could never work.
+  const bool no_material = out_of_material_ && now_ < material_hold_until_;
+  const bool backing_off = now_ < abandon_hold_until_;
+  if (no_material || backing_off) want = BuildGoal::None;
+  else if (taking_fire || wants_cover) {
     if (losing || (taking_fire && hurt)) want = BuildGoal::BoxUp;
     else if (height_available && rng_.unit() < 0.5f) want = BuildGoal::GainHeight;
     else want = BuildGoal::PeekWindow;

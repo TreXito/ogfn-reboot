@@ -2186,7 +2186,16 @@ void TickAll()
 			if (BIn.piece != ogfn::PieceKind::None)
 			{
 				static ogfn::BuildGrid s_grid;
-				if (ApplyBuildPiece(Controller, Pawn, BIn, s_grid))
+				// Report the outcome back to the builder. Without this the brain plans
+				// but never learns, so a bot whose piece is refused keeps sending the
+				// same impossible input at its input rate, which is a machine hammering
+				// a button. The failure reasons are inferred here: this client exposes
+				// no placement-failure reason, so a null spawn is treated as blocked and
+				// an empty material counter is checked directly when the fork has one.
+				const bool bPlaced = ApplyBuildPiece(Controller, Pawn, BIn, s_grid);
+				M.builder.report_result(bPlaced,
+					bPlaced ? ogfn::BuildRefusal::None : ogfn::BuildRefusal::Blocked);
+				if (bPlaced)
 				{
 					M.buildCount++;
 					// The edit is what turns a wall into a window. Editing needs the
