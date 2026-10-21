@@ -200,15 +200,35 @@ MotorOutput Motor::aim_at(const Vec3& self_pos, float current_yaw, float current
   // Both axes must be on target: a bot that fires with its crosshair at the
   // target's feet is worse than one that does not fire at all.
   // Per-class precision: a shotgun points at a body, a sniper must be exact.
-  const float tolerance = lerpf(6.5f, 2.0f, persona_.aim_skill) * weapon_.tolerance_scale;
+  //
+  // The tolerance has to scale with DISTANCE, because the thing being aimed at is a
+  // body of fixed SIZE and the angle it subtends shrinks with range. A fixed 4-degree
+  // gate at 18m, where a 0.6m-wide body subtends 1.9 degrees, meant the bot pulled the
+  // trigger on a shot that could not physically connect: measured first-shot accuracy
+  // was 2% when pre-aimed, against a human 30 to 55%. A player's gate is "the
+  // crosshair is on the body", and how many degrees that is depends on how far away
+  // it is. Wider than the body by a skill-scaled margin, because humans take shots
+  // that clip a shoulder.
+  const float body_deg = rad2deg(std::atan2(0.7f, std::max(2.f, dist)));
+  const float human_margin = lerpf(1.9f, 1.05f, persona_.aim_skill);
+  const float tolerance = std::min(body_deg * human_margin,
+                                   lerpf(6.5f, 2.6f, persona_.aim_skill)) *
+                          weapon_.tolerance_scale;
   // Fire HYSTERESIS. Without it the trigger flickers at frame rate whenever the
   // crosshair sits near the tolerance boundary, which quantised every burst to a
   // multiple of 1/60s (9 distinct lengths in 5484 bursts). A human does not tap the
   // trigger 60 times a second: they pull it, hold while roughly on target, release
   // when clearly off. Releasing needs a wider error than acquiring.
   const float release_tol = tolerance * 1.9f;
+  // Do not shoot while the crosshair is still swinging onto the target. A player
+  // who snaps onto someone does not fire mid-swing: the shot goes when the crosshair
+  // ARRIVES. Without this the bot fired during the settle from its idle scan, which
+  // is why pre-aimed targets scored 2%: it had a "tolerance" but pulled the trigger
+  // while still 4 degrees out and moving.
+  const bool settled_enough = std::fabs(yaw_velocity_) < lerpf(40.f, 90.f, persona_.aim_skill);
   const bool within_acquire = last_aim_error_deg_ < tolerance &&
-                              last_pitch_error_deg_ < tolerance * 1.6f;
+                              last_pitch_error_deg_ < tolerance * 1.6f &&
+                              settled_enough;
   const bool within_hold = last_aim_error_deg_ < release_tol &&
                            last_pitch_error_deg_ < release_tol * 1.6f;
 
