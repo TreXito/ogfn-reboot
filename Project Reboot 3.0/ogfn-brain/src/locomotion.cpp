@@ -173,7 +173,11 @@ MoveOutput Locomotion::update(float dt, float self_yaw_deg, float yaw_to_target_
   if (!st.airborne && now_ > jump_gate_until_ && now_ > next_jump_) {
     bool want_jump = false;
     if (!engaged && st.on_slope) want_jump = rng_.unit() < 0.35f;      // scramble up
-    if (engaged && health_frac < 0.4f) want_jump = rng_.unit() < 0.30f;  // bail out
+    // Bail out of a lost fight. Keyed on "hurt and someone close" rather than on
+    // `engaged`, because the moment you decide to RUN is exactly when a player
+    // jumps to break the line: the decision becomes Flee, engaged goes false, and a
+    // hurt fleeing bot used to stop jumping entirely.
+    if (health_frac < 0.4f && target_distance < 20.f) want_jump = rng_.unit() < 0.30f;
     if (want_jump) {
       out.jumping = true;
       next_jump_ = now_ + kJumpFloor + rng_.range(0.f, 1.4f);

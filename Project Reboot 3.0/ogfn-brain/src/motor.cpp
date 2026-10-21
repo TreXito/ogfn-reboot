@@ -4,6 +4,65 @@
 
 namespace ogfn {
 
+// Class profiles. Numbers chosen to be recognisable by ear, not to match any
+// particular real weapon: a rifle cycles ~600 RPM, an SMG faster with a shorter
+// mag, a shotgun slow and hard-hitting, a sniper one shot at a time.
+WeaponProfile weapon_rifle() {
+  WeaponProfile w(30, 2.35f);
+  w.cls = WeaponClass::Rifle;
+  w.shot_interval_secs = 0.100f;   // ~600 RPM
+  w.burst_min_secs = 0.16f;
+  w.burst_max_secs = 0.46f;
+  w.tolerance_scale = 1.f;
+  w.recoil_per_shot = 0.15f;
+  w.tap_range_m = 45.f;
+  return w;
+}
+
+WeaponProfile weapon_smg() {
+  WeaponProfile w(30, 1.85f);
+  w.cls = WeaponClass::Smg;
+  w.shot_interval_secs = 0.070f;   // ~850 RPM
+  w.burst_min_secs = 0.20f;
+  w.burst_max_secs = 0.62f;        // holds longer: that is what it is for
+  w.tolerance_scale = 1.35f;       // forgiving up close, rubbish far away
+  w.recoil_per_shot = 0.11f;
+  w.tap_range_m = 28.f;            // tapping with an SMG at 40m is a waste
+  return w;
+}
+
+WeaponProfile weapon_shotgun() {
+  WeaponProfile w(8, 2.9f);
+  w.cls = WeaponClass::Shotgun;
+  w.shot_interval_secs = 0.85f;    // pump action
+  w.single_shot = true;
+  w.tolerance_scale = 2.2f;        // a spread weapon points at a body, not a head
+  w.recoil_per_shot = 0.9f;
+  w.tap_range_m = 14.f;            // outside this it does nothing
+  return w;
+}
+
+WeaponProfile weapon_sniper() {
+  WeaponProfile w(6, 3.4f);
+  w.cls = WeaponClass::Sniper;
+  w.shot_interval_secs = 1.45f;    // bolt action
+  w.single_shot = true;
+  w.tolerance_scale = 0.45f;       // you do not take a 3-degree shot with a bolt
+  w.recoil_per_shot = 2.4f;
+  w.tap_range_m = 150.f;
+  return w;
+}
+
+WeaponProfile weapon_for_class(WeaponClass c) {
+  switch (c) {
+    case WeaponClass::Smg: return weapon_smg();
+    case WeaponClass::Shotgun: return weapon_shotgun();
+    case WeaponClass::Sniper: return weapon_sniper();
+    case WeaponClass::Rifle: break;
+  }
+  return weapon_rifle();
+}
+
 void Motor::tick(float dt) {
   if (dt <= 0.f) return;
   if (reloading_) {
@@ -140,7 +199,8 @@ MotorOutput Motor::aim_at(const Vec3& self_pos, float current_yaw, float current
   // discipline: nobody holds the trigger for a whole magazine at 60 metres.
   // Both axes must be on target: a bot that fires with its crosshair at the
   // target's feet is worse than one that does not fire at all.
-  const float tolerance = lerpf(6.5f, 2.0f, persona_.aim_skill);
+  // Per-class precision: a shotgun points at a body, a sniper must be exact.
+  const float tolerance = lerpf(6.5f, 2.0f, persona_.aim_skill) * weapon_.tolerance_scale;
   // Fire HYSTERESIS. Without it the trigger flickers at frame rate whenever the
   // crosshair sits near the tolerance boundary, which quantised every burst to a
   // multiple of 1/60s (9 distinct lengths in 5484 bursts). A human does not tap the
@@ -182,6 +242,12 @@ MotorOutput Motor::aim_at(const Vec3& self_pos, float current_yaw, float current
     gap_left_ -= dt;
   }
 
+  // Cyclic rate. THE weapon tell: without this a gun fires once per tick, which is
+  // 3600 RPM at a 60 Hz tick, and every class sounds like the same hose. The
+  // cooldown is a floor on the time between shots, and it is ticked every frame so
+  // it drains whether or not the trigger is down.
+  shot_cooldown_ -= dt;
+
   bool trigger = false;
   if (reloading_) {
     trigger = false;
@@ -189,10 +255,13 @@ MotorOutput Motor::aim_at(const Vec3& self_pos, float current_yaw, float current
     if (rounds_left_ <= 0) {
       begin_reload();
       trigger = false;
-    } else if (gap_left_ <= 0.f && trigger_discipline(dist, dt)) {
+    } else if (gap_left_ <= 0.f && shot_cooldown_ <= 0.f && trigger_discipline(dist, dt)) {
       --rounds_left_;
       trigger = true;
       ++shots_fired_;
+      // Jittered a little per shot: a weapon's cyclic rate is fixed but a
+      // trigger pull is not, and an exact period is audible as a machine.
+      shot_cooldown_ = weapon_.shot_interval_secs * rng_.range(0.94f, 1.08f);
     }
   } else if (!fire && rounds_left_ * 2 < weapon_.mag_size && rng_.unit() < dt * 0.6f) {
     // Top up in the quiet moments, the way people do, not only when dry. The
@@ -200,7 +269,26 @@ MotorOutput Motor::aim_at(const Vec3& self_pos, float current_yaw, float current
     begin_reload();
   }
 
-  out.firing = trigger && !reloading_;
+  // Single-shot classes (shotgun, sniper): the hand comes off the trigger after
+  // each round, so the gun cannot be held. Without this a pump shotgun fires as
+  // fast as its cooldown allows while the trigger stays down, which sounds like a
+  // semi-auto and is the first thing a player notices.
+  if (trigger && weapon_.single_shot) {
+    // A human re-pulls after a short settle, not on the same frame.
+    gap_left_ = weapon_.shot_interval_secs * rng_.range(0.92f, 1.15f);
+    in_burst_ = false;
+  }
+  // Two different signals. `firing` is the trigger being held, which is what the
+  // engine needs to keep the weapon shooting. `shot_fired` is a round leaving the
+  // barrel under the cyclic-rate model, which is what ammo, recoil and telemetry
+  // count. Collapsing them into one boolean is what let a rifle fire at 3600 RPM
+  // without any test noticing.
+  out.shot_fired = trigger && !reloading_;
+  // For an automatic, holding the trigger is a state that outlives the tick. For a
+  // single-shot it is one frame: the hand comes off and re-pulls. Forcing it false
+  // for single-shot classes (my first attempt) meant the engine was never told to
+  // fire a shotgun at all.
+  out.firing = on_target && !reloading_ && (!weapon_.single_shot || out.shot_fired);
   // The trigger latch: set when the hand is on it, cleared when the burst ends.
   if (out.firing) {
     trigger_held_ = true;
@@ -211,7 +299,8 @@ MotorOutput Motor::aim_at(const Vec3& self_pos, float current_yaw, float current
   // Recoil: each shot climbs the muzzle a little, and the hand pulls back down with
   // lag. Clamped so a long burst cannot point the bot at the sky.
   if (trigger) {
-    recoil_pitch_ = clampf(recoil_pitch_ + lerpf(0.22f, 0.08f, persona_.aim_skill), 0.f, 4.5f);
+    recoil_pitch_ = clampf(recoil_pitch_ + weapon_.recoil_per_shot *
+                                              lerpf(1.4f, 0.55f, persona_.aim_skill), 0.f, 4.5f);
   } else {
     recoil_pitch_ = lerpf(recoil_pitch_, 0.f, clampf(dt * 4.f, 0.f, 1.f));
   }
@@ -226,7 +315,7 @@ bool Motor::trigger_discipline(float distance, float dt) {
   // is a human thing to do badly, not to skip entirely, so the duty cycle is
   // never exactly zero.
   float base_duty = 1.f;
-  if (distance > 45.f) base_duty = lerpf(0.10f, 0.30f, persona_.aim_skill);
+  if (distance > weapon_.tap_range_m) base_duty = lerpf(0.10f, 0.30f, persona_.aim_skill);
   else if (distance > 18.f) base_duty = lerpf(0.35f, 0.60f, persona_.aim_skill);
   else base_duty = 1.f;   // in someone's face, magazine goes brrr
 
@@ -237,9 +326,13 @@ bool Motor::trigger_discipline(float distance, float dt) {
   // own duration and its own sub-tick phase offset, so no two are identical.
   if (!in_burst_) {
     in_burst_ = true;
-    const float base = distance > 45.f ? rng_.range(0.10f, 0.28f)
-                     : distance > 18.f ? rng_.range(0.16f, 0.44f)
-                                       : rng_.range(0.30f, 1.15f);
+    // Burst window comes from the WEAPON, not one shared curve: an SMG holds a
+    // third of a second longer than a rifle, a shotgun does not burst at all.
+    const float base = distance > weapon_.tap_range_m ? rng_.range(0.10f, 0.26f)
+                     : weapon_.single_shot ? weapon_.burst_max_secs
+                     : distance > 18.f ? rng_.range(weapon_.burst_min_secs, weapon_.burst_max_secs)
+                                       : rng_.range(weapon_.burst_max_secs,
+                                                    weapon_.burst_max_secs * 2.5f);
     burst_len_ = base * lerpf(0.85f, 1.2f, persona_.patience);
     burst_hold_frac_ = distance > 45.f ? rng_.range(0.45f, 0.8f) : 1.f;
     // Sub-tick release offset. out.firing is a per-tick boolean, so a burst can only

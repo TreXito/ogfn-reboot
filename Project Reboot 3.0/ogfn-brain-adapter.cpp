@@ -148,9 +148,10 @@ namespace
 			persona = ogfn::Persona::sample(rng, skillBias);
 			brain = ogfn::Brain(persona, seed);
 			motor = ogfn::Motor(persona, seed);
-			// Rifle-ish profile: 30 rounds, honest reload. The motor needs a magazine
-			// or the trigger is a hose (bench caught 5.4s continuous fire).
-			motor.set_weapon(ogfn::WeaponProfile(30, 2.6f));
+			// Placeholder until TryArm learns what the bot was actually granted, at
+			// which point set_weapon is called again with the real class. The motor
+			// needs SOME magazine or the trigger is a hose.
+			motor.set_weapon(ogfn::weapon_rifle());
 			loco = ogfn::Locomotion(persona, seed ^ 0x51ED270Bull);
 			builder = ogfn::Builder(persona, seed ^ 0xB0117ull);
 		}
@@ -722,6 +723,38 @@ namespace
 		LOG_INFO(LogBots, "[ogfn] weapon candidates: {}", (int)g_weaponCands.size());
 	}
 
+	// Classify a weapon by its asset path. The bot must hold the gun it is actually
+	// holding: one shared "30 rounds, 2.6s reload" profile for every weapon in the
+	// lobby is why a pump shotgun sounded like a rifle. Ordered so that the more
+	// specific names win (a "Shotgun_Sniper" would be neither, but a
+	// "SMG_Rifle" style name is not a thing these builds ship).
+	ogfn::WeaponClass ClassifyWeapon(const std::string& Path)
+	{
+		auto has = [&](const char* s) { return Path.find(s) != std::string::npos; };
+		// Note: "Athena" is in every one of these paths, so it cannot decide anything.
+		if (has("Shotgun") || has("Pump")) return ogfn::WeaponClass::Shotgun;
+		if (has("Sniper") || has("Bolt") || has("Hunting") || has("Rail"))
+			return ogfn::WeaponClass::Sniper;
+		if (has("SMG") || has("Submachine") || has("MachinePistol") || has("Compact"))
+			return ogfn::WeaponClass::Smg;
+		return ogfn::WeaponClass::Rifle;
+	}
+
+	ogfn::WeaponProfile ProfileForWeapon(const std::string& Path)
+	{
+		const ogfn::WeaponClass c = ClassifyWeapon(Path);
+		const ogfn::WeaponProfile w = ogfn::weapon_for_class(c);
+		static int logged = 0;
+		if (logged < 12)
+		{
+			++logged;
+			static const char* kNames[] = {"rifle", "smg", "shotgun", "sniper"};
+			LOG_INFO(LogBots, "[ogfn] weapon class: {} -> {} (mag {}, {:.2f}s/shot)",
+				Path, kNames[static_cast<int>(c)], w.mag_size, w.shot_interval_secs);
+		}
+		return w;
+	}
+
 	bool TryArm(Mind& M, AFortPlayerControllerAthena* Controller)
 	{
 		ScanWeaponsOnce();
@@ -746,7 +779,12 @@ namespace
 		AFortPlayerController::ServerExecuteInventoryItemHook(Controller, Instance->GetItemEntry()->GetItemGuid());
 		M.armGuid = Instance->GetItemEntry()->GetItemGuid(); // stored for equip-only rebinds (pawn swaps)
 
-		LOG_INFO(LogBots, "[ogfn] armed: {}", g_weaponCands[idx]->GetPathName());
+		// The bot fires the gun it is actually holding: cyclic rate, mag and trigger
+		// shape all come from the weapon it was granted.
+		const std::string armedPath = g_weaponCands[idx]->GetPathName();
+		M.motor.set_weapon(ProfileForWeapon(armedPath));
+
+		LOG_INFO(LogBots, "[ogfn] armed: {}", armedPath);
 		M.bArmed = true;
 		return true;
 	}
