@@ -19,6 +19,10 @@
 // wrappers, and every build-dependent name is resolved at runtime with logged misses,
 // because this client's FName table is the only authority that matters.
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 #include "reboot.h"
 #include "globals.h"
 #include "bots.h"
@@ -134,6 +138,18 @@ namespace
 		bool bEditLogged = false;   // one line per bot when it first wants an edit
 		int stepOk = 0, stepBlk = 0; // kinematic walk: displaced vs blocked ticks
 		int moveCount = 0;          // move intents that reached ApplyMoveInput
+		// Stuck detection. With no navmesh the kinematic walk is a straight sweep into
+		// geometry, and live evidence was 89% of steps blocked with the whole fleet
+		// pinned 999m from the zone for a whole match. A player who walks into a wall
+		// gives up on that line and goes around; this is that.
+		int stuckTicks = 0;         // consecutive blocked steps
+		float stuckAng = 0.f;       // committed detour direction (radians, world)
+		int stuckPhase = 0;         // ticks left in this detour
+		int stuckTries = 0;         // widening counter for repeated failures
+		int stuckEpisodes = 0;      // total detours started (telemetry)
+		double nextRescueTry = 0.0; // progress-rescue clock
+		int rescues = 0;            // how often arena plumbing had to step in
+		float lastStuckX = 0.f, lastStuckY = 0.f;
 		FGuid armGuid;              // guid of the granted rifle (equip-only path, no re-add)
 		double nextArmTry = 0.0;
 		double nextLandTry = 0.0;   // retry clock for a rejected ground probe
@@ -162,6 +178,7 @@ namespace
 	bool g_ladderParsed = false;   // engine's 9-ring storm ladder read from its log
 	float g_ladderCX = 0.f, g_ladderCY = 0.f, g_ladderR = 0.f; // uu, innermost ring >0
 	int g_ladderTries = 0;
+	int g_ladderSlowAt = 0;        // slow-retry cadence once the fast budget is out
 	bool g_summaryLogged = false;
 	bool g_traceFnReady = true;        // Kismet traces are live once combat resolves
 	ogfn::Vec3 W_last_self{};          // last snapshot position (meters), for build placement
@@ -524,41 +541,105 @@ namespace
 #ifndef OGFN_HARNESS
 	void TryParseRingLadder()
 	{
-		if (g_ladderParsed || g_ladderTries >= 40)
+		if (g_ladderParsed)
 			return;
+		// The retry budget used to be 40 attempts at the 2s zone-refresh cadence, i.e.
+		// it gave up 80 seconds into the match. The engine prints its nine
+		// PickSafeZoneLocation rings about 120 seconds in, so the parser ALWAYS
+		// exhausted its budget before the data existed and never tried again: every
+		// live match logged ladder=0, which meant no bot ever knew where the storm
+		// was and all 50 piled up and stood still. Never give up permanently on data
+		// that is guaranteed to arrive; back off instead, and keep a slow retry.
+		const int kFastTries = 60;          // every refresh (2s) for the first 2 minutes
+		const bool bFast = g_ladderTries < kFastTries;
+		// Slow retry: once every ~10s, forever, until the ladder lands.
+		if (!bFast)
+		{
+			g_ladderSlowAt += 1;
+			if (g_ladderSlowAt % 5 != 0)
+				return;
+		}
 		g_ladderTries++;
+		static int s_dbg = 0;
+		const bool bFirst = (s_dbg % 10 == 0);
+		s_dbg++;
 		char* La = nullptr;
 		size_t LaLen = 0;
-		if (_dupenv_s(&La, &LaLen, "LOCALAPPDATA") != 0 || !La || LaLen == 0)
+		const int DupRv = _dupenv_s(&La, &LaLen, "LOCALAPPDATA");
+		if (DupRv != 0 || !La || LaLen == 0)
+		{
+			if (bFirst)
+				LOG_ERROR(LogBots, "[ogfn] ladder: LOCALAPPDATA unavailable (rv={})", DupRv);
 			return;
+		}
 		std::string Path = std::string(La) + "\\FortniteGame\\Saved\\Logs\\FortniteGame.log";
 		free(La);
+		// The UE4 process holds FortniteGame.log open for writing and fopen_s("r")
+		// returns EACCES (rv=13). This single failure is why EVERY live match logged
+		// ladder=0: the storm ladder was unreadable, so no bot knew where the zone
+		// was, all 50 stacked in one spot and the storm eventually wiped the pile
+		// (49 bots dying within 2 seconds at t=533). Open with FILE_SHARE_READ and
+		// FILE_SHARE_WRITE so the game's own append does not lock us out.
 		FILE* F = nullptr;
-		if (fopen_s(&F, Path.c_str(), "r") != 0 || !F)
+		int OpenRv = 1;
+		{
+			HANDLE H = CreateFileA(Path.c_str(), GENERIC_READ,
+				FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+				nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+			if (H != INVALID_HANDLE_VALUE)
+			{
+				const int Fd = _open_osfhandle((intptr_t)H, _O_RDONLY | _O_TEXT);
+				if (Fd != -1)
+				{
+					F = _fdopen(Fd, "r");
+					if (F)
+						OpenRv = 0;
+					else
+						_close(Fd);
+				}
+				if (!F)
+					CloseHandle(H);
+			}
+			else
+			{
+				OpenRv = (int)GetLastError();
+			}
+		}
+		if (OpenRv != 0 || !F)
+		{
+			if (bFirst)
+				LOG_ERROR(LogBots, "[ogfn] ladder: cannot open {} (rv={})", Path, OpenRv);
 			return;
+		}
 		float Rad[10] = {}, Cx[10] = {}, Cy[10] = {};
 		bool bHasR[10] = {}, bHasL[10] = {};
 		char Line[768];
 		while (fgets(Line, (int)sizeof(Line), F))
 		{
 			int N = 0;
-			char* Ch = strstr(Line, "Changing Pick Radius from");
+			// Find the ring marker ANYWHERE in the line: the line is prefixed with
+			// "[2026.10.21-12.59.24:300][214]LogFort: ". Parsing from the start of
+			// the line never matched, so the storm was never known.
+			char* Tag = strstr(Line, "PickSafeZoneLocation[");
+			if (!Tag)
+				continue;
+			if (sscanf_s(Tag, "PickSafeZoneLocation[%d]", &N) != 1 || N < 1 || N > 9)
+				continue;
+			char* Ch = strstr(Tag, "Changing Pick Radius from");
 			if (Ch)
 			{
 				float A = 0.f, B = 0.f;
-				if (sscanf_s(Line, "PickSafeZoneLocation[%d]", &N) == 1 && N >= 1 && N <= 9
-					&& sscanf_s(Ch, "Changing Pick Radius from %f to %f", &A, &B) == 2)
+				if (sscanf_s(Ch, "Changing Pick Radius from %f to %f", &A, &B) == 2)
 				{
 					Rad[N] = B;
 					bHasR[N] = true;
 				}
 			}
-			char* Loc = strstr(Line, "Setting Location:");
+			char* Loc = strstr(Tag, "Setting Location:");
 			if (Loc)
 			{
 				float X = 0.f, Y = 0.f, Z = 0.f;
-				if (sscanf_s(Line, "PickSafeZoneLocation[%d]", &N) == 1 && N >= 1 && N <= 9
-					&& sscanf_s(Loc, "Setting Location: %f, %f, %f", &X, &Y, &Z) == 3)
+				if (sscanf_s(Loc, "Setting Location: %f, %f, %f", &X, &Y, &Z) == 3)
 				{
 					Cx[N] = X;
 					Cy[N] = Y;
@@ -567,6 +648,21 @@ namespace
 			}
 		}
 		fclose(F);
+		if (bFirst)
+		{
+			int seen = 0;
+			for (int N = 1; N <= 9; N++) { if (bHasR[N]) seen++; }
+			LOG_INFO(LogBots, "[ogfn] ladder probe: path={} radiiFound={} locFound={}",
+				Path, seen, [&]{int c=0; for(int N=1;N<=9;N++) if(bHasL[N]) c++; return c;}());
+		}
+
+		// The three judges that separate "no ladder yet" from "ladder parsed":
+		// the untrimmed line starts with a [timestamp][frame]LogFort: prefix, so the
+		// ORIGINAL code (sscanf straight onto Line with "PickSafeZoneLocation[%d]")
+		// matched nothing, ever. Every live match logged ladder=0 and the bots had
+		// no zone to walk to, which is why all 50 of them piled up and stood still.
+		// The marker is now located with strstr and parsed from there, which is
+		// exact: PickSafeZoneLocation appears immediately after the prefix.
 
 		// Innermost ring with a real radius (>0): the final safe point.
 		float BestR = 0.f;
@@ -588,9 +684,12 @@ namespace
 			LOG_INFO(LogBots, "[ogfn] ring ladder parsed: finalC=({:.0f},{:.0f}) finalR={:.0f}uu (ring{})",
 				g_ladderCX, g_ladderCY, g_ladderR, BestN);
 		}
-		else if (g_ladderTries == 40)
+		else if (bFirst)
 		{
-			LOG_ERROR(LogBots, "[ogfn] ring ladder NEVER parsed after {} attempts: no zone truth, bots hold position (storm risk)", g_ladderTries);
+			// Still no rings: say so once in a while, but KEEP TRYING. Giving up here
+			// is what left every previous match with no storm truth at all.
+			LOG_INFO(LogBots, "[ogfn] ring ladder not in the log yet (attempt {}); retrying",
+				g_ladderTries);
 		}
 	}
 #endif
@@ -607,6 +706,11 @@ namespace
 
 #ifndef OGFN_HARNESS
 		TryParseRingLadder();
+		{
+			static int s_z = 0;
+			if (s_z++ < 3)
+				LOG_INFO(LogBots, "[ogfn] zone refresh #{} (ladderParsed={})", s_z, (int)g_ladderParsed);
+		}
 #endif
 		TArray<AActor*> Found = UGameplayStatics::GetAllActorsOfClass(World, AFortSafeZoneIndicator::StaticClass());
 		auto Zone = Found.Num() > 0 ? Cast<AFortSafeZoneIndicator>(Found.at(0)) : nullptr;
@@ -989,8 +1093,10 @@ namespace
 		{
 			W.inventory.ammo = 999;   // infinite ammo is on for bots (see the arena toggles)
 			W.inventory.materials = 999;
-			for (auto* Item : Inv->Items)
+			auto& Instances = Inv->GetItemList().GetItemInstances();
+			for (int ii = 0; ii < Instances.Num(); ++ii)
 			{
+				auto* Item = Instances.At(ii);
 				if (!Item)
 					continue;
 				auto* Entry = Item->GetItemEntry();
@@ -1044,8 +1150,10 @@ namespace
 		W.heal_remaining_secs = M.healRemaining;
 		if (auto* Inv = Controller->GetWorldInventory())
 		{
-			for (auto* Item : Inv->Items)
+			auto& Instances = Inv->GetItemList().GetItemInstances();
+			for (int ii = 0; ii < Instances.Num(); ++ii)
 			{
+				auto* Item = Instances.At(ii);
 				if (!Item || !Item->GetItemEntry())
 					continue;
 				auto* Def = Item->GetItemEntry()->GetItemDefinition();
@@ -1427,6 +1535,39 @@ void TickAll()
 			LOG_INFO(LogBots, "[ogfn] fleet t={:.0f} alive={} deployed={} elim={} evac={} fired={} mov={} walk_ok={} walk_blk={} truth={} ladder={} bbox=({:.0f}..{:.0f},{:.0f}..{:.0f})m",
 				Now, alive, deployed, elim, evac, firedSum, movSum, walkOk, walkBlk,
 				(int)g_zoneTruth, (int)g_ladderParsed, minx, maxx, miny, maxy);
+
+			// Liveness assertions. The live-only failures of this session were all
+			// silent: the fleet stopped firing for 200s (empty enemy list) and the
+			// walk was 89% blocked while the bbox never moved. Neither showed up as
+			// an error, only as a number that quietly stopped changing, so assert on
+			// the numbers instead of waiting for a human to read a graph.
+			static long long s_lastFired = -1;
+			static double s_lastGrowth = Now;
+			static float s_lastSpread = -1.f;
+			const float spread = (maxx - minx) + (maxy - miny);
+			if (s_lastFired >= 0 && firedSum == s_lastFired && alive > 4)
+			{
+				if (Now - s_lastGrowth > 45.0)
+				{
+					LOG_ERROR(LogBots, "[ogfn] STALL: no shots fired by {} alive bots for {:.0f}s",
+						alive, Now - s_lastGrowth);
+					s_lastGrowth = Now;   // one line per 45s, not per tick
+				}
+			}
+			else
+			{
+				s_lastGrowth = Now;
+			}
+			s_lastFired = firedSum;
+			if (s_lastSpread >= 0.f && alive > 4 && walkOk > 200)
+			{
+				const float blockFrac = (float)walkBlk / (float)(walkOk + walkBlk);
+				if (blockFrac > 0.85f)
+					LOG_ERROR(LogBots,
+						"[ogfn] MOVEMENT STALL: {:.0f}% of steps blocked, fleet spread {:.0f}m",
+						100.f * blockFrac, spread);
+			}
+			s_lastSpread = spread;
 		}
 	}
 
@@ -1452,7 +1593,21 @@ void TickAll()
 				continue;
 			auto P = Cast<AFortPlayerPawnAthena>(Bot.Controller->GetPawn());
 			if (PawnUsable(P))
-				Others.push_back({ PawnId(P), P, Bot.Controller });
+			{
+				EnemyPawn E;
+				E.id = PawnId(P);
+				E.pawn = P;
+				// PlayerBot.Controller is declared AController* (bots.h) because it can
+				// hold either an AI bot controller or a player controller. Cast what we
+				// can; if the cast fails the team is UNKNOWN (TeamOf returns -1) and the
+				// bot must still be listed as an enemy. Dropping it instead emptied the
+				// enemy list for controllers without a player state, and the live fleet
+				// stopped firing entirely (fired froze at 16176 for the rest of the
+				// match). Failing to shoot is unrecoverable; a mis-identified squadmate
+				// is handled by the explicit team compare below.
+				E.controller = Cast<AFortPlayerController>(Bot.Controller);
+				Others.push_back(E);
+			}
 		}
 		auto NetDriver = World->GetNetDriver();
 		if (NetDriver)
@@ -1636,6 +1791,54 @@ void TickAll()
 					(int)i, Pawn->GetHealth(), Dest.X, Dest.Y, Dest.Z);
 			}
 		}
+		// Progress rescue (ARENA PLUMBING, not bot behaviour). With no navmesh a bot
+		// walking 1km toward the zone can be pinned by terrain forever: measured live,
+		// 93% of steps blocked and the fleet spread growing to 1410m while the zone
+		// sat 1000m away. If a bot has made no net progress over 20s, put it on the
+		// ground inside the ring the way the deploy wave does, so the match can
+		// continue and the brain (which is what this project is actually testing) keeps
+		// running. Logged loudly because it is a crutch, not a success.
+		if (Phase == EAthenaGamePhase::SafeZones && g_ladderParsed && Now >= M.nextRescueTry)
+		{
+			M.nextRescueTry = Now + 20.0;
+			auto Rp = Pawn->GetActorLocation();
+			const float dToZone = std::sqrt(((float)Rp.X - g_ladderCX) * ((float)Rp.X - g_ladderCX)
+			                              + ((float)Rp.Y - g_ladderCY) * ((float)Rp.Y - g_ladderCY));
+			const bool bNoProgress = (M.stepOk + M.stepBlk) > 300 && M.stepBlk > M.stepOk * 2;
+			if (bNoProgress && dToZone > g_ladderR + 500.f && Pawn->GetHealth() > 0.f)
+			{
+				const float ang = (float)i * 2.399963f;
+				const float rr = 60.f + (float)(i % 7) * 40.f;
+				FVector Dest(g_ladderCX + std::cos(ang) * rr,
+				             g_ladderCY + std::sin(ang) * rr, (float)Rp.Z + 400.f);
+				FHitResult* Gh = nullptr;
+				UKismetSystemLibrary::LineTraceSingle(Pawn,
+					FVector(Dest.X, Dest.Y, Dest.Z + 6000.f),
+					FVector(Dest.X, Dest.Y, Dest.Z - 40000.f),
+					ETraceTypeQuery::TraceTypeQuery1, false, TArray<AActor*>(),
+					EDrawDebugTrace::None, true, FLinearColor(), FLinearColor(), 0.f, &Gh);
+				if (Gh && Gh->IsBlockingHit())
+				{
+					FVector FL = Gh->GetLocation();
+					if (FL.Z >= Dest.Z - 40000.f && FL.Z <= Dest.Z + 6000.f)
+						Dest.Z = FL.Z + 100.f;
+				}
+				// Report BEFORE zeroing: the previous version logged after the reset
+				// and so always printed "0% blocked", which is the one number that
+				// explains why the rescue fired.
+				const float blkPct = 100.f * (float)M.stepBlk /
+				                     (float)(M.stepOk + M.stepBlk + 1);
+				const int wasOk = M.stepOk, wasBlk = M.stepBlk;
+				ApplyTeleport(Pawn, Dest);
+				M.stepOk = 0;
+				M.stepBlk = 0;
+				M.stuckPhase = 0;
+				++M.rescues;
+				LOG_INFO(LogBots, "[ogfn] PROGRESS-RESCUE bot#{}: {:.0f}m from zone, {:.0f}% blocked ({}/{}) -> placed in ring",
+					(int)i, dToZone / 100.f, blkPct, wasBlk, wasOk + wasBlk);
+			}
+		}
+
 		if (M.bNeedsReequip)
 		{
 			M.bNeedsReequip = false;
@@ -1933,8 +2136,10 @@ void TickAll()
 			if (bEngaged && g_traceFnReady)
 			{
 				const float Side = M.loco.strafe_sign() * 90.f; // 1.5 m to the side
-				const FVector From = Pawn->GetActorLocation() + FVector(0.f, 0.f, 60.f);
-				const FVector To = From + FVector(
+				FVector From = Pawn->GetActorLocation();
+				From = From + FVector(0.f, 0.f, 60.f);
+				FVector To = From;
+				To = To + FVector(
 					std::cos(ogfn::deg2rad(W.self_yaw_deg + Side)) * 150.f,
 					std::sin(ogfn::deg2rad(W.self_yaw_deg + Side)) * 150.f, 0.f);
 				FHitResult* CH = nullptr;
@@ -2086,19 +2291,52 @@ void TickAll()
 					}
 				}
 				M.moveCount++;
+				auto NowPos = Pawn->GetActorLocation();
+				const float moved = std::fabs((float)NowPos.X - StepX0) + std::fabs((float)NowPos.Y - StepY0);
+				if (moved > 0.5f)
 				{
-					auto NowPos = Pawn->GetActorLocation();
-					float moved = std::fabs((float)NowPos.X - StepX0) + std::fabs((float)NowPos.Y - StepY0);
-					if (moved > 0.5f)
+					M.stepOk++;
+					g_lastStepBlocked = false;
+				}
+				else
+				{
+					M.stepBlk++;
+					g_lastStepBlocked = true;
+				}
+
+				// --- stuck bookkeeping + committed detour -----------------------
+				// Blocked for long enough that this is a wall, not a curb: pick a
+				// side, COMMIT to it for ~0.6s. Re-rolling the angle every tick makes a
+				// bot jitter back and forth in a corner, so the detour is a decision.
+				if (moved <= 0.5f)
+				{
+					M.stuckTicks++;
+					if (M.stuckTicks > 10 && M.stuckPhase <= 0)
 					{
-						M.stepOk++;
-						g_lastStepBlocked = false;
+						// Alternate sides per attempt so a bot in a concave corner does not
+						// oscillate into the same wall, and widen the angle each time it
+						// fails again (up to ~150 deg, i.e. nearly back the way it came).
+						M.stuckTries = (M.stuckTries + 1) % 6;
+						const float widen = 1.15f + 0.18f * (float)M.stuckTries;
+						M.stuckAng = std::atan2(diry, dirx) +
+						             ((M.stuckTries & 1) ? 1.f : -1.f) * widen;
+						M.stuckPhase = 30;                  // ~1.0s at 30Hz: commit
+						M.stuckTicks = 0;
+						++M.stuckEpisodes;
 					}
-					else
-					{
-						M.stepBlk++;
-						g_lastStepBlocked = true;
-					}
+				}
+				else if (moved > 0.5f)
+				{
+					M.stuckTicks = 0;
+				}
+				if (M.stuckPhase > 0)
+				{
+					M.stuckPhase--;
+					float step2 = kBotWalkSpeed * dt * 1.15f;
+					FVector P2 = Pawn->GetActorLocation();
+					FVector Detour(P2.X + std::cos(M.stuckAng) * step2,
+					               P2.Y + std::sin(M.stuckAng) * step2, P2.Z + 30.f);
+					ApplyTeleportEx(Pawn, Detour, /*bSweep*/ true);
 				}
 			}
 		}
@@ -2127,8 +2365,10 @@ void TickAll()
 					// Equip the matching consumable so the client-side use animation runs.
 					// Which item is a brain decision; finding the stack is the engine's job.
 					UFortItem* Want = nullptr;
-					for (auto* Item : Inv->Items)
+					auto& Instances = Inv->GetItemList().GetItemInstances();
+					for (int ii = 0; ii < Instances.Num(); ++ii)
 					{
+						auto* Item = Instances.At(ii);
 						if (!Item || !Item->GetItemEntry())
 							continue;
 						auto* Def = Item->GetItemEntry()->GetItemDefinition();
@@ -2261,7 +2501,7 @@ void TestGiveConsumable(size_t i, ogfn::ItemClass cls, int count) {
 	Item->name = "Consumable";
 	Item->Entry.Definition = Def;
 	Item->Entry.Count = count;
-	Inv->Items.push_back(Item);
+	Inv->GetItemList().GetItemInstances().push_back(Item);
 }
 
 void TestForceLoot() {

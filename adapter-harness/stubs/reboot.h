@@ -238,11 +238,40 @@ struct FFortItemEntry
 };
 struct UFortItem : UObject { FFortItemEntry Entry; FFortItemEntry* GetItemEntry() { return &Entry; } };
 
+// Mirrors the REAL fork's shape, which is the whole point of a stub. An earlier
+// version of this stub invented a flat `std::vector<UFortItem*> Items`; the adapter
+// was written against that invention, the harness passed, and the actual MSVC build
+// failed with "Items is not a member of AFortInventory". The real access is
+// GetItemList().GetItemInstances() (FortInventory.h), so the stub now says that and
+// the harness cannot certify code the client will reject.
+// The REAL fork's TArray has no begin()/end(), only Num() and At() (Array.h), so a
+// range-for over it does not compile. This stub used std::vector and therefore
+// certified a range-for that the client rejects. It now exposes the same Num()/At()
+// surface, so anything that compiles here compiles there.
+template <typename T>
+struct TArrayStub
+{
+	std::vector<T> v;
+	int Num() const { return static_cast<int>(v.size()); }
+	T& At(int i) { return v[static_cast<size_t>(i)]; }
+	void push_back(T x) { v.push_back(x); }
+	size_t size() const { return v.size(); }
+	T& operator[](size_t i) { return v[i]; }
+};
+
+struct FFortItemList
+{
+	TArrayStub<UFortItem*> ItemInstances;
+	TArrayStub<UFortItem*>& GetItemInstances() { return ItemInstances; }
+};
+
 struct AFortInventory : UObject
 {
-	std::vector<UFortItem*> Items;
+	FFortItemList List;
 	int adds = 0;
 	int updates = 0;
+
+	FFortItemList& GetItemList() { return List; }
 
 	template <typename DefT>
 	std::pair<std::vector<UFortItem*>, std::vector<UFortItem*>> AddItem(DefT*, bool* bShouldUpdate, int = 1, int = -1, bool = false)
@@ -251,7 +280,7 @@ struct AFortInventory : UObject
 		if (bShouldUpdate) *bShouldUpdate = true;
 		auto Item = new UFortItem();
 		Item->name = "ItemInstance";
-		Items.push_back(Item);
+		List.ItemInstances.push_back(Item);
 		return { { Item }, {} };
 	}
 	void Update() { updates++; }
