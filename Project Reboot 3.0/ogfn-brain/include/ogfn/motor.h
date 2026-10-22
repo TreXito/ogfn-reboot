@@ -46,6 +46,16 @@ struct WeaponProfile {
   // Beyond this the class is wasting ammo, so it taps instead of holding.
   float tap_range_m = 45.f;
 
+  // What one round does, and how many of them leave the barrel per trigger pull.
+  // These live here, not in the adapter, because "how much damage is one shot" is a
+  // property of the GUN. Resolving a rifle's round with a shotgun's falloff is how a
+  // hit model ends up lying about its own accuracy.
+  float damage = 25.f;       // per pellet, point blank
+  int pellets = 1;           // >1 for a spread weapon
+  float falloff_start_m = 30.f;  // full damage inside this
+  float falloff_end_m = 90.f;    // and never below min_damage_frac past it
+  float min_damage_frac = 0.35f;
+
   WeaponProfile() = default;
   WeaponProfile(int mag, float reload) : mag_size(mag), reload_secs(reload) {}
 };

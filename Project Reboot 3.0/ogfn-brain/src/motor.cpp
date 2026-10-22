@@ -16,6 +16,10 @@ WeaponProfile weapon_rifle() {
   w.tolerance_scale = 1.f;
   w.recoil_per_shot = 0.15f;
   w.tap_range_m = 45.f;
+  w.damage = 31.f;                 // assault rifle, per round
+  w.pellets = 1;
+  w.falloff_start_m = 30.f;
+  w.falloff_end_m = 90.f;
   return w;
 }
 
@@ -28,6 +32,10 @@ WeaponProfile weapon_smg() {
   w.tolerance_scale = 1.35f;       // forgiving up close, rubbish far away
   w.recoil_per_shot = 0.11f;
   w.tap_range_m = 28.f;            // tapping with an SMG at 40m is a waste
+  w.damage = 17.f;                 // fast and light, that is the trade
+  w.pellets = 1;
+  w.falloff_start_m = 18.f;        // falls off early: it is a close-range gun
+  w.falloff_end_m = 50.f;
   return w;
 }
 
@@ -39,6 +47,11 @@ WeaponProfile weapon_shotgun() {
   w.tolerance_scale = 2.2f;        // a spread weapon points at a body, not a head
   w.recoil_per_shot = 0.9f;
   w.tap_range_m = 14.f;            // outside this it does nothing
+  w.damage = 9.f;                  // PER PELLET, and there are ten of them
+  w.pellets = 10;
+  w.falloff_start_m = 6.f;         // the reason a pump stops working at range
+  w.falloff_end_m = 20.f;
+  w.min_damage_frac = 0.12f;
   return w;
 }
 
@@ -50,6 +63,11 @@ WeaponProfile weapon_sniper() {
   w.tolerance_scale = 0.45f;       // you do not take a 3-degree shot with a bolt
   w.recoil_per_shot = 2.4f;
   w.tap_range_m = 150.f;
+  w.damage = 105.f;                // near-body-shot lethality, as it should be
+  w.pellets = 1;
+  w.falloff_start_m = 200.f;       // effectively none
+  w.falloff_end_m = 400.f;
+  w.min_damage_frac = 0.85f;
   return w;
 }
 

@@ -7,6 +7,7 @@
 #include "mathx.h"
 #include "perception.h"
 #include "persona.h"
+#include "hitmodel.h"
 #include "rng.h"
 #include "squad.h"
 
@@ -162,6 +163,11 @@ class Brain {
     return rng_.lognormal_median(persona_.reaction_ms / 1000.f, persona_.reaction_sigma);
   }
 
+  // Resolve one round the bot just fired. Lives on the Brain (not in the adapter) so
+  // the spread draw comes from the bot's OWN stream: the same seed replays the same
+  // misses, which is what makes a recorded match reproducible.
+  ShotOutcome resolve_shot(const ShotInput& in) { return hit_.resolve(in, rng_); }
+
   Decision think(const WorldSnapshot& w);
   void observe(const Observation& obs, double now) { perception_.update(obs, now); }
 
@@ -197,6 +203,7 @@ class Brain {
   Decision make_intent(ActionKind a, const WorldSnapshot& w);
 
   Persona persona_;
+  HitModel hit_;
   Rng rng_;
   Perception perception_;
   // Where the view should be, per the movement layer (see Locomotion::MoveOutput).

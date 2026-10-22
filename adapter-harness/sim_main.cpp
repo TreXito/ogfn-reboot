@@ -43,6 +43,7 @@ namespace OgfnBot { void TestClearBurstState(size_t i); void TestSetLadder(float
                   void TestForceLoot(); int TestLootSeen(size_t); bool TestLootClassSeen(size_t, ItemClass);
                   bool TestLootChoice(size_t, int*, float*, float*); int TestSquadmateCount(size_t);
                   void TestClearEnemies(); bool TestTargetIsSquadmate(size_t);
+                  float TestTotalEnemyHealth(); int TestShotsResolved(size_t); int TestShotsHit(size_t); float TestDamageDealt(size_t);
                   int TestHealEquips(size_t); void TestGiveConsumable(size_t, ItemClass, int); } // adapter (OGFN_HARNESS)
 
 static int g_failures = 0;
@@ -322,7 +323,11 @@ int main()
 	int p0BeforeP7 = P0->fireCount;
 	TickFor(5.0);
 	EXPECT(FleetFireTotal() > fireBeforeP7, "bots in range perceive and fight each other (meters boundary holds)");
-	EXPECT(P0->fireCount > p0BeforeP7, "bot0 pulls the trigger on an in-range neighbor");
+	// NOT "bot0 fired": with a working damage path bot0 can be dead inside these five
+	// seconds, and it was (hp=0 sh=0). Firing is a FLEET property here; one bot's
+	// survival is the wrong instrument. The per-bot trigger is proved in P16.
+	EXPECT(FleetFireTotal() > fireBeforeP7 + 20,
+		"the fleet keeps shooting through the whole window (no stall)");
 
 	// ---------- P8: storm-evac (ladder + hp gate) ----------
 	// User directive: bots must not die to the storm. The hard guarantee: hurt
@@ -621,11 +626,97 @@ int main()
 		P0->Shield = 0.f;      // shields down, so the heal is unambiguous
 		P0->Health = 100.f;
 		OgfnBot::TestGiveConsumable(0, ogfn::ItemClass::ShieldPotion, 3);
-		TickFor(2.0);
-		std::printf("  [P15] equips issued for heals: %d\n", OgfnBot::TestHealEquips(0));
+		// Park the fleet: with a working damage path an adjacent bot kills the patient in
+		// about three seconds, and "heal while being shot" is a different test.
+		for (size_t bi = 1; bi < AllPlayerBotsToTick.size(); ++bi)
+			AllPlayerBotsToTick[bi].Pawn->Location =
+				FVector(90000.f + (float)bi * 30000.f, 45000.f - (float)bi * 30000.f, 100.f);
+		OgfnBot::TestClearEnemies();
+		TickFor(4.0);
+		std::printf("  [P15] equips issued for heals: %d  hp=%.0f sh=%.0f\n",
+			OgfnBot::TestHealEquips(0), P0->Health, P0->Shield);
 		EXPECT(OgfnBot::TestHealEquips(0) > 0,
 		       "a healing bot equips a real consumable (heal is not a no-op)");
 	}
+
+	// ---------- P16: fired rounds do damage, cover reduces it ----------
+	// The live bug this closes: 80,627 rounds fired, ZERO eliminations. The trigger
+	// worked and the client has no ranged damage path, so shooting was theatre. Now the
+	// brain resolves its own shots against real pawns.
+	//
+	// Measured as TOTAL enemy health, deliberately. An earlier version watched one
+	// assumed pawn, and bot0 turned out to be shooting a leftover pawn from an earlier
+	// scenario: damage was landing the whole time and the assertion read 0. Total health
+	// cannot be fooled about who was hit.
+	std::printf("\n-- P16: fired rounds do damage, cover reduces it --\n");
+	{
+		world.ND->Connections.v.clear();
+		EnemyPawn->bDestroyed = true;
+		Harness::g_wallUp = false;
+		OgfnBot::TestSetLadder(90000.f, 45000.f, 30000.f);
+		P0->Location = FVector(90000.f, 45000.f, 100.f);
+		P0->Health = 100.f; P0->Shield = 100.f;
+		P0->Rotation.Yaw = 0.f;
+		P0->lastRotation.Yaw = 0.f;
+		// An opponent 8 m dead ahead, restored to life (earlier scenarios destroyed
+		// pawns, and a destroyed pawn is invisible to perception).
+		for (size_t bi = 1; bi < AllPlayerBotsToTick.size(); ++bi)
+		{
+			auto* Pb = AllPlayerBotsToTick[bi].Pawn;
+			Pb->bDestroyed = false;
+			Pb->Location = FVector(90000.f + 800.f + (float)(bi - 1) * 400.f,
+			                       45000.f, 100.f);
+			Pb->SetMaxHealth(100000.f);
+			Pb->SetHealth(100000.f);
+			Pb->SetShield(0.f);
+			AllPlayerBotsToTick[bi].Controller->MyPawn = Pb;
+		}
+		OgfnBot::TestClearEnemies();
+
+		// Settle first, THEN snapshot: the setup above resets health, so a snapshot
+		// taken before the first tick measures the reset, not the shooting.
+		TickFor(0.5);
+		int resolvedBefore = OgfnBot::TestShotsResolved(0);
+		const float hpBefore = OgfnBot::TestTotalEnemyHealth();
+		TickFor(5.0);
+		const int resolved = OgfnBot::TestShotsResolved(0) - resolvedBefore;
+		const float hpAfter = OgfnBot::TestTotalEnemyHealth();
+		std::printf("  [P16] resolved=%d hit=%d dmg=%.1f  enemyHp %.0f -> %.0f\n",
+			resolved, OgfnBot::TestShotsHit(0), OgfnBot::TestDamageDealt(0),
+			hpBefore, hpAfter);
+		EXPECT(resolved > 0, "bot0 resolves rounds (shot_fired, not merely trigger held)");
+		EXPECT(OgfnBot::TestShotsHit(0) > 0, "some of those rounds connect with a body");
+		EXPECT(OgfnBot::TestDamageDealt(0) > 0.f, "and they carry damage");
+		EXPECT(hpAfter < hpBefore, "the enemies actually lose health (the damage path is live)");
+
+		// Cover must matter. Compare damage dealt by the SAME bot at the same range with
+		// and without a wall between: this is bot0's own accounting, so it cannot be
+		// confused about which pawn it hit.
+		const float openDealt = OgfnBot::TestDamageDealt(0);
+		const int openResolved = OgfnBot::TestShotsResolved(0);
+		// Pin both sides of the wall. These pawns walk at 6 m/s, so over four seconds
+		// they cross the plane and "behind a wall" stops being true - the window has to
+		// be short and the geometry re-pinned, or the test measures walking, not cover.
+		Harness::g_wallUp = true;
+		Harness::g_wallX = 90000.f + 400.f;   // the plane sits between bot0 and bot1
+		P0->Location = FVector(90000.f, 45000.f, 100.f);
+		for (size_t bi = 1; bi < AllPlayerBotsToTick.size(); ++bi)
+			AllPlayerBotsToTick[bi].Pawn->Location =
+				FVector(90000.f + 800.f + (float)(bi - 1) * 400.f, 45000.f, 100.f);
+		TickFor(0.34);   // ~10 ticks: enough to resolve rounds, too short to walk out
+		const float coveredDealt = OgfnBot::TestDamageDealt(0) - openDealt;
+		const int coveredResolved = OgfnBot::TestShotsResolved(0) - openResolved;
+		Harness::g_wallUp = false;
+		const float perOpen = openResolved > 0 ? openDealt / openResolved : 0.f;
+		const float perCovered = coveredResolved > 0 ? coveredDealt / coveredResolved : 0.f;
+		std::printf("  [P16] damage per resolved round: open %.2f covered %.2f\n",
+			perOpen, perCovered);
+		EXPECT(perCovered < perOpen, "behind a wall the same gun does less per round");
+	}
+
+	// un-park the fleet the P16 scenario destroyed
+	for (size_t bi = 2; bi < AllPlayerBotsToTick.size(); ++bi)
+		AllPlayerBotsToTick[bi].Pawn->bDestroyed = false;
 
 	// ---------- summary ----------
 	std::printf("\n=== summary ===\n");

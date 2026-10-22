@@ -104,6 +104,14 @@ namespace
 		bool bAutoLanded = false;   // bus-dump place-once flag (see the auto-land block)
 		bool bNeedsReequip = false; // wave respawn: rebind the controller's rifle to the new pawn
 		int fireCount = 0;          // motor triggers pulled (evidence of sustained combat)
+		// The gun this bot was actually granted. Kept here so the HIT MODEL resolves
+		// shots with the same cyclic rate, damage and spread the motor fires with:
+		// grading a rifle's shot with a shotgun's falloff is how a hit model lies.
+		ogfn::WeaponProfile armedProfile;
+		int shotsResolved = 0;      // rounds the hit model actually scored
+		int shotsHit = 0;           // ... of which connected with a body
+		float damageDealt = 0.f;    // total damage this bot has inflicted
+		double lastResolveLog = 0.0;
 		bool bSeenAlive = false;    // has this bot been observed with a pawn IN-MATCH?
 		                            // burst victims never have (wave rescues them);
 		                            // killed bots do (wave must NOT resurrect them)
@@ -249,6 +257,11 @@ namespace
 		AFortPlayerPawnAthena* pawn = nullptr;
 		AFortPlayerController* controller = nullptr;   // for squad/team resolution
 	};
+
+	// File scope, not a static inside TickAll: the hit-resolution path needs the same
+	// list the perception pass just built, and passing it by hand would let the two
+	// drift. Rebuilt from scratch every tick before any bot is processed.
+	std::vector<EnemyPawn> Others;
 
 	// UNIT CONTRACT: the brain speaks METERS (perception max_range=90, tests place
 	// enemies at 10..500, target_distance 15..20), the engine speaks centimeters.
@@ -892,7 +905,8 @@ namespace
 		// The bot fires the gun it is actually holding: cyclic rate, mag and trigger
 		// shape all come from the weapon it was granted.
 		const std::string armedPath = g_weaponCands[idx]->GetPathName();
-		M.motor.set_weapon(ProfileForWeapon(armedPath));
+		M.armedProfile = ProfileForWeapon(armedPath);
+		M.motor.set_weapon(M.armedProfile);
 
 		LOG_INFO(LogBots, "[ogfn] armed: {}", armedPath);
 		M.bArmed = true;
@@ -1224,6 +1238,97 @@ namespace
 // Called from Bots::Tick every net tick while Globals::bEnableOgfnBrain is set.
 // The stock tick keeps only what the brain deliberately does not own yet: bus deploy,
 // thank-the-driver, and its warmup hop (suppressed while brains are on).
+	// Defined just above TickAll: it needs `Others` (rebuilt each tick inside
+	// TickAll) and CanSee, neither of which exists this early in the file.
+	void ResolveShot(Mind& M, AFortPlayerPawnAthena* Pawn, AFortPlayerControllerAthena* Controller,
+	                 const ogfn::TrackedTarget* Target, const ogfn::MotorOutput& Out, double Now);
+
+	// What did that round actually do?
+	//
+	// Fires the brain's hit model against the pawn the motor was aiming at, and lands the
+	// damage on the victim with the engine's own setters. This exists because the client
+	// cannot do it: there is no ranged damage path on 3.5, so without this a bot that aims
+	// perfectly is indistinguishable from one shooting the sky.
+	//
+	// Conservative in three ways on purpose: it needs a REAL target pawn resolved from
+	// this tick's enemy list, a real line-of-sight result, and it never invents damage. A
+	// miss stays a miss and is counted as one.
+	void ResolveShot(Mind& M, AFortPlayerPawnAthena* Pawn, AFortPlayerControllerAthena* Controller,
+	                 const ogfn::TrackedTarget* Target, const ogfn::MotorOutput& Out, double Now)
+	{
+		if (!Target || !Pawn || !Controller)
+			return;
+
+		// Map the tracked id back to a live pawn. The enemy list is rebuilt every tick
+		// from fresh controllers, so a respawn cannot leave us writing to a dead actor.
+		//
+		// COUNT ALL MATCHES, not the first. PawnId folds a pointer into 31 bits, so two
+		// live pawns CAN share an id (seen in the harness: 0x602acf59e630 and
+		// 0x5f3a16961b80 hashed equal). Taking the first match then applied every round
+		// to a bystander while the intended victim never lost a point. An ambiguous id
+		// means we do not know who was hit, so we decline rather than damage the wrong bot.
+		AFortPlayerPawnAthena* Victim = nullptr;
+		int matches = 0;
+		for (auto& Other : Others)
+			if (Other.id == Target->id && PawnUsable(Other.pawn))
+			{
+				Victim = Other.pawn;
+				++matches;
+			}
+		if (!Victim || matches > 1 || Victim == Pawn)
+			return;
+
+		const FVector SelfLoc = Pawn->K2_GetActorLocation();
+		const FVector VictimLoc = Victim->K2_GetActorLocation();
+		// Chest height, not feet: a capsule measured from the ground plane puts the
+		// whole body above the ray and every shot reads as a miss.
+		const FVector AimPoint = VictimLoc + FVector(0.f, 0.f, 60.f);
+
+		ogfn::ShotInput In;
+		In.from = ToVec(SelfLoc);
+		In.yaw_deg = Out.yaw_deg;
+		In.pitch_deg = Out.pitch_deg;
+		In.target_center = ToVec(AimPoint);
+		In.target_health = Victim->GetHealth();
+		In.target_shield = Victim->GetShield();
+		In.has_line_of_sight = CanSee(Pawn, SelfLoc, AimPoint);   // the ENGINE decides
+		In.distance = length(In.target_center - In.from);
+
+		// The gun decides the shape of the shot. A shotgun scatters and stops working
+		// past its range; a sniper does not. One profile for every weapon is what makes
+		// a bot sound like one gun wearing different models.
+		const ogfn::WeaponProfile& Wp = M.armedProfile;
+		In.damage = Wp.damage;
+		In.pellets = Wp.pellets;
+		In.spread_deg = 1.1f * Wp.tolerance_scale;
+		In.falloff_start_m = Wp.falloff_start_m;
+		In.falloff_end_m = Wp.falloff_end_m;
+		In.min_damage_frac = Wp.min_damage_frac;
+
+		ogfn::ShotOutcome Res = M.brain.resolve_shot(In);
+		M.shotsResolved++;
+
+		const float Total = Res.damage_on_shield + Res.damage_on_health;
+		if (Total <= 0.f)
+			return;   // a miss stays a miss
+
+		M.shotsHit++;
+		M.damageDealt += Total;
+
+		ogfn::DamageSplit Split = ogfn::apply_damage(Total, Victim->GetShield(), Victim->GetHealth());
+		Victim->SetShield(Split.shield_left);
+		Victim->SetHealth(Split.health_left);
+
+		if (&M == &g_minds[0] && Now - M.lastResolveLog > 5.0)
+		{
+			M.lastResolveLog = Now;
+			LOG_INFO(LogBots,
+				"[ogfn] hit: dmg={:.1f} total={:.0f} hits={}/{} victimHp={:.0f} victimSh={:.0f}",
+				Total, M.damageDealt, M.shotsHit, M.shotsResolved,
+				Victim->GetHealth(), Victim->GetShield());
+		}
+	}
+
 void TickAll()
 {
 	// The ReadyToStartMatch hook stops firing the moment the match commits (which is
@@ -1601,7 +1706,6 @@ void TickAll()
 	// Every other pawn in the match, resolved per bot further down: on a solo playlist
 	// every bot is its own team, but on a duo/squad playlist a bot that treats a
 	// teammate as an enemy shoots its own squad, which is the worst possible tell.
-	static std::vector<EnemyPawn> Others;
 	Others.clear();
 	Others.reserve(bots.size() + 4);
 
@@ -2472,16 +2576,18 @@ void TickAll()
 			}
 		}
 
-		if (Out.firing)
+		// A ROUND LEFT THE BARREL: resolve what it did.
+		//
+		// This is the whole reason the brain carries a hit model. On this client there is
+		// no ranged damage path at all (80,627 rounds fired, zero eliminations, only
+		// regen GE ticks in the damage log), so "firing" used to be pure theatre: the
+		// trigger animated, the target never lost a point. shot_fired is the honest
+		// signal that a round was actually sent, so that is what resolves a shot here.
+		if (Out.shot_fired)
 		{
-			static bool s_firstFire = false;
-			if (!s_firstFire)
-			{
-				s_firstFire = true;
-				LOG_INFO(LogBots, "[ogfn] first fire event (motor trigger pulled)");
-			}
 			M.fireCount++;
 			ApplyFire(Pawn);
+			ResolveShot(M, Pawn, Controller, Target, Out, Now);
 		}
 
 	}
@@ -2494,6 +2600,35 @@ void TestStrafeStats(size_t i, int* total, int* forward) {
 		*total = g_minds[i].strafeSteps;
 		*forward = g_minds[i].strafeForward;
 	}
+}
+
+// Shots that connected, and the damage they did. The live symptom this exists for is
+// "80,627 rounds fired, zero eliminations": if these stay zero while fireCount climbs,
+// the damage path is dead again.
+// Health of a specific pawn id, so a scenario can measure the bot that was actually
+// shot rather than a pointer it assumed would be shot.
+float TestHealthOfId(int id) {
+	for (auto& O : Others)
+		if (O.id == id && O.pawn) return O.pawn->GetHealth() + O.pawn->GetShield();
+	return -1.f;
+}
+// Total health+shield across every live enemy. Unambiguous: if rounds are landing on
+// ANYBODY, this drops. A per-pawn check can silently measure the wrong body, which is
+// exactly what happened here.
+float TestTotalEnemyHealth() {
+	float t = 0.f;
+	for (auto& O : Others)
+		if (O.pawn && PawnUsable(O.pawn)) t += O.pawn->GetHealth() + O.pawn->GetShield();
+	return t;
+}
+int TestShotsResolved(size_t i) {
+	return i < g_minds.size() ? g_minds[i].shotsResolved : 0;
+}
+int TestShotsHit(size_t i) {
+	return i < g_minds.size() ? g_minds[i].shotsHit : 0;
+}
+float TestDamageDealt(size_t i) {
+	return i < g_minds.size() ? g_minds[i].damageDealt : 0.f;
 }
 
 int TestHealEquips(size_t i) {

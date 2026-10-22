@@ -184,7 +184,19 @@ struct AFortPlayerPawnAthena : AFortPawn, ProcessEventRecorder
 	AFortPlayerPawnAthena() { s_pawns.push_back(this); }
 	float Health = 100.f, Shield = 100.f;
 	float GetHealth() { return Health; }
+	FVector K2_GetActorLocation() { return Location; }
 	float GetShield() { return Shield; }
+	// Present on the real AFortPawn (FortPawn.h: SetHealth/SetShield/SetMaxShield).
+	// A stub without them does not mirror the client, it merely agrees with whatever
+	// the adapter happens to call.
+	void SetHealth(float v) { Health = v; }
+	void SetShield(float v) { Shield = v; }
+	void SetMaxHealth(float v) { MaxHealth = v; }
+	void SetMaxShield(float v) { MaxShield = v; }
+	float MaxHealth = 100.f, MaxShield = 100.f;
+	bool bDBNO = false;
+	bool IsDBNO() { return bDBNO; }
+	void SetDBNO(bool v) { bDBNO = v; }
 	void ProcessEvent(UFunction* fn, void* params) override
 	{
 		if (!fn) return;
