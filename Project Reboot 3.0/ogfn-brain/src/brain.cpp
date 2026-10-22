@@ -33,6 +33,38 @@ float zone_pressure(const WorldSnapshot& w) {
   return 0.7f + clampf(d / 60.f, 0.f, 1.f) * 1.6f;
 }
 
+// Expected damage per second against the visible target, as a multiplier on Engage.
+//
+// Returns 0.35..1.35: cheap to reach and hurtful is above 1, blocked or far and weak
+// is well below. It is deliberately NOT a veto: a player will still take a long shot or
+// shoot at someone behind a fence, they just weight it lower than a clean close one.
+float expected_damage_factor(const WorldSnapshot& w) {
+  if (!w.target_is_visible) return 0.35f;
+  const float d = clampf(w.target_distance, 1.f, 200.f);
+
+  // Angular size of the body: the dominant term at range. 0.42m radius at 12m is
+  // ~2.0deg, at 60m ~0.4deg, which is the whole reason long fights are hard.
+  const float body_deg = rad2deg(std::atan2(0.42f, d));
+  // A human's own line error does not shrink with distance, so the probability of the
+  // crosshair being inside that angle falls roughly with 1/d^2.
+  float connect = clampf(body_deg / (body_deg + 0.55f), 0.10f, 0.97f);
+
+  // Cover: the round never arrives.
+  if (!w.target_has_line_of_sight) connect *= 0.18f;
+
+  // Weapon falloff, in the same shape the hit model uses.
+  const float falloff = d <= 30.f ? 1.f
+                      : d >= 90.f ? 0.35f
+                      : lerpf(1.f, 0.35f, (d - 30.f) / 60.f);
+
+  // A reloading target is free damage even with a mediocre shot.
+  const float freebie = w.target_is_reloading ? 1.12f : 1.f;
+
+  // Map 0..~1 of (connect * falloff) onto the 0.35..1.35 band.
+  const float raw = connect * falloff * freebie;
+  return clampf(0.35f + raw * 0.95f, 0.35f, 1.35f);
+}
+
 float health_fraction(const WorldSnapshot& w) {
   return clampf((w.self_health + w.self_shield) / 200.f, 0.f, 1.f);
 }
@@ -63,7 +95,16 @@ float Brain::score(ActionKind k, const WorldSnapshot& w) const {
       float s = 0.30f * (0.4f + p.greed) * clampf(c.worth * 2.2f, 0.f, 1.f);
       s *= 1.f - clampf(zp * 0.9f, 0.f, 0.95f);
       s *= 1.f - clampf((1.f - hp) * 0.5f, 0.f, 0.5f);
-      if (engaged) s *= 0.15f;
+      // Looting while someone is shooting at you is a good way to die, but a flat
+      // 0.15x is too absolute: a big shield 8m away at ZERO shield is worth grabbing
+      // even with a contact at 40m, and the old constant made Loot score 0.008 in
+      // exactly that case, so the bot never replaced a shield it had lost. Scale by
+      // how much of a fight it actually is: on top of you is a real reason to leave it,
+      // a distant contact is not.
+      if (engaged) {
+        const float threat = clampf((45.f - w.target_distance) / 37.f, 0.f, 1.f);
+        s *= lerpf(1.f, 0.18f, threat);
+      }
       return s;
     }
 
@@ -93,6 +134,15 @@ float Brain::score(ActionKind k, const WorldSnapshot& w) const {
       // player. Distant contacts are only fought when nothing better is going on.
       const float proximity = clampf(1.f + (25.f - w.target_distance) / 25.f, 0.5f, 1.7f);
       s *= proximity;
+      // Can this shot actually CONNECT, and how much will it hurt if it does?
+      //
+      // Score used to be a pure "how far away is it" curve, so a bot would commit to a
+      // target behind a wall at 80m exactly as hard as one at 12m in the open. A player
+      // does not: they know a body subtends less angle further out, that their weapon
+      // falls off, and that a wall eats the round. Expected damage per second is the
+      // honest version of that judgement, and it uses the same hit model the engine
+      // side uses to resolve the shots, so the two cannot disagree.
+      s *= expected_damage_factor(w);
       s *= lerpf(0.35f, 1.f, clampf(hp * 1.2f, 0.f, 1.f) + p.aggression * 0.3f);
       if (w.target_is_reloading) s *= 1.25f;
       if (w.target_health < 50.f) s *= 1.30f;
@@ -334,7 +384,16 @@ Decision Brain::think(const WorldSnapshot& w) {
 
   // Between plan beats the bot is committed. This is the main difference
   // between human cadence and 60Hz utility spam.
-  if (has_decided_ && w.time < next_plan_time_) {
+  //
+  // GUARD: commitment is bounded in TIME, not only by the clock the caller supplies.
+  // If the engine hands the brain a repeated or non-advancing timestamp (a paused
+  // sim, a hitched frame, a harness that ticks without advancing `time`), then
+  // `w.time` never reaches `next_plan_time_` and the bot stays committed FOREVER:
+  // it walks one stale intent for the rest of the match. Live evidence of the shape:
+  // a fleet that fired 20,315 shots and then never fired again. A committed plan
+  // therefore also expires after a fixed number of ticks, whatever the clock says.
+  if (has_decided_ && w.time < next_plan_time_ && committed_ticks_ < kMaxCommittedTicks) {
+    ++committed_ticks_;
     Decision d = make_intent(last_action_, w);
     d.reason = "committed";
     d.score = last_score_;
@@ -350,6 +409,7 @@ Decision Brain::think(const WorldSnapshot& w) {
     return d;
   }
   next_plan_time_ = w.time + rng_.range(plan_fast_secs_, plan_slow_secs_);
+  committed_ticks_ = 0;
 
   const ActionKind candidates[] = {
       ActionKind::Idle,      ActionKind::Loot,       ActionKind::RotateToCircle,

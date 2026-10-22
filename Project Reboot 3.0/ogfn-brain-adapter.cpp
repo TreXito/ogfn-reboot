@@ -72,6 +72,7 @@ int TestHealEquips(size_t i);
 int TestLootSeen(size_t i);
 bool TestLootClassSeen(size_t i, ogfn::ItemClass cls);
 bool TestLootChoice(size_t i, int* pickupId, float* x, float* y);
+bool TestTargetIsSquadmate(size_t i);
 #endif
 
 namespace
@@ -147,6 +148,11 @@ namespace
 		int stuckPhase = 0;         // ticks left in this detour
 		int stuckTries = 0;         // widening counter for repeated failures
 		int stuckEpisodes = 0;      // total detours started (telemetry)
+		// Last snapshot this bot built, for harness diagnostics. The old code read a
+		// fleet-global W_last_self, which is the position of whichever bot was processed
+		// LAST -- so a per-bot distance query silently measured against another bot and
+		// reported 0.0m.
+		ogfn::WorldSnapshot lastSnap;
 		double nextRescueTry = 0.0; // progress-rescue clock
 		int rescues = 0;            // how often arena plumbing had to step in
 		float lastStuckX = 0.f, lastStuckY = 0.f;
@@ -1093,6 +1099,12 @@ namespace
 		{
 			W.inventory.ammo = 999;   // infinite ammo is on for bots (see the arena toggles)
 			W.inventory.materials = 999;
+			// CURRENT shield belongs in the inventory too, not just the snapshot. The loot
+			// valuator asks "is a big pot the best thing on the floor" and the answer is
+			// entirely about how much shield you are carrying right now; leaving this at
+			// its default 0 made every bot believe it was bare, so a big pot was always
+			// worth maximum and bots walked to every pot in sight forever.
+			W.inventory.shield = (int)W.self_shield;
 			auto& Instances = Inv->GetItemList().GetItemInstances();
 			for (int ii = 0; ii < Instances.Num(); ++ii)
 			{
@@ -1177,6 +1189,14 @@ namespace
 		if (Target)
 		{
 			W.target_is_visible = Target->visible;
+			// A target only reaches this list through a line-of-sight trace (see the
+			// bLos gate above), so a VISIBLE one is, by construction, shootable. Say so
+			// explicitly rather than leaving the snapshot's default: the Engage score
+			// discounts blocked targets, and if this field silently stayed true the
+			// discount would never apply and the whole term would be dead weight.
+			// A remembered-but-not-visible target is a different case: it may well be
+			// behind the wall that broke the line, so it is marked blocked.
+			W.target_has_line_of_sight = Target->visible;
 			ogfn::Vec3 D = Target->last_seen_pos - W.self_pos;
 			W.target_distance = ogfn::length(D);
 			W.target_health = Target->health;
@@ -1932,6 +1952,7 @@ void TickAll()
 
 		ogfn::WorldSnapshot W = BuildSnapshot(M, Pawn, Controller, enemiesSeenWithin30, Now);
 		W_last_self = W.self_pos;
+		M.lastSnap = W;
 		M.decision = M.brain.think(W);
 #ifdef OGFN_HARNESS
 		RecordLootForHarness(i, W, M.brain);
@@ -2504,6 +2525,16 @@ void TestGiveConsumable(size_t i, ogfn::ItemClass cls, int count) {
 	Inv->GetItemList().GetItemInstances().push_back(Item);
 }
 
+
+void TestClearEnemies() {
+	// Harness-only: drop every tracked target so a scenario can test looting, healing or
+	// rotation without a rival standing in the way. Fleet bots move toward bot0 across
+	// scenarios, so "the enemy is gone" is not something a scenario can set by moving
+	// one pawn: perception has to be told.
+	if (!g_minds.empty())
+		g_minds[0].brain.perception().clear();
+}
+
 void TestForceLoot() {
 	// Force the loot sweep now: the live cadence is 2 Hz and a scenario must not
 	// have to wait out (or be blocked by) the previous sweep's clock.
@@ -2523,6 +2554,19 @@ bool TestLootClassSeen(size_t i, ogfn::ItemClass cls) {
 	if (i >= g_lastLoot.size()) return false;
 	for (auto& s : g_lastLoot[i])
 		if (s.cls == cls) return true;
+	return false;
+}
+// Is the bot's current nearest target one of its own squadmates (by pawn id)?
+bool TestTargetIsSquadmate(size_t i) {
+	if (i >= g_minds.size()) return false;
+	auto* T = g_minds[i].brain.perception().nearest(true);
+	if (!T) return false;
+	auto* P = AllPlayerBotsToTick.size() > 1 ? AllPlayerBotsToTick[1].Pawn : nullptr;
+	if (!P) return false;
+	// The teammate is the pawn flagged is_teammate in the last observation; perception
+	// drops those before tracking, so the check is that NO tracked target shares its id.
+	for (const auto& t : g_minds[i].brain.perception().targets())
+		if (t.id == T->id && t.is_teammate) return true;
 	return false;
 }
 bool TestLootChoice(size_t i, int* pickupId, float* x, float* y) {

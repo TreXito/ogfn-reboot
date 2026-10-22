@@ -54,6 +54,11 @@ class Perception {
   void update(const Observation& obs, double now);
 
   const std::vector<TrackedTarget>& targets() const { return targets_; }
+
+  // Forget everything. Exists for test scenarios that need a clean slate (loot, heal,
+  // rotation) without waiting out the 4 second memory window, and for a respawn where
+  // the previous body's tracks are meaningless. Not called from any gameplay path.
+  void clear() { targets_.clear(); }
   const TrackedTarget* nearest(bool require_visible) const;
   const TrackedTarget* by_id(int id) const;
   bool can_see(int id, double now, float max_age = 0.f) const;

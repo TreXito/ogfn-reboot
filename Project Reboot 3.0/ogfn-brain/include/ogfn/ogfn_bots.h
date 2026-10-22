@@ -2,6 +2,7 @@
 // Singles-header umbrella for the bot brain static library.
 #include "brain.h"
 #include "building.h"
+#include "hitmodel.h"
 #include "locomotion.h"
 #include "loot.h"
 #include "mathx.h"

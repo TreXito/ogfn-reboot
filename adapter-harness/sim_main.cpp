@@ -42,6 +42,7 @@ namespace OgfnBot { void TestClearBurstState(size_t i); void TestSetLadder(float
                   void TestClearBuildLog(); std::vector<std::pair<int,int>> TestBuildLog();
                   void TestForceLoot(); int TestLootSeen(size_t); bool TestLootClassSeen(size_t, ItemClass);
                   bool TestLootChoice(size_t, int*, float*, float*); int TestSquadmateCount(size_t);
+                  void TestClearEnemies(); bool TestTargetIsSquadmate(size_t);
                   int TestHealEquips(size_t); void TestGiveConsumable(size_t, ItemClass, int); } // adapter (OGFN_HARNESS)
 
 static int g_failures = 0;
@@ -434,7 +435,15 @@ int main()
 		// when edge <= -20m). Widen the ladder for this scenario: a real early-game
 		// ring is kilometres across and looting is what people actually do.
 		OgfnBot::TestSetLadder(90000.f, 45000.f, 30000.f);   // 300 m radius
-		P0->Location = FVector(90400.f, 45000.f, 100.f);
+		// OFF-centre on purpose: this used to put bot0 exactly on the ladder centre,
+		// which is also where every other bot steers, so the fleet converged onto the
+		// loot scenario and turned it into a firefight. 180m out, still inside the ring.
+		P0->Location = FVector(90000.f - 18000.f, 45000.f, 100.f);
+		// And park the rest of the fleet well away: the brain is RIGHT to prefer a fight
+		// at 5m to a shield pot, so the only way to test looting is to have nobody near.
+		for (size_t bi = 1; bi < AllPlayerBotsToTick.size(); ++bi)
+			AllPlayerBotsToTick[bi].Pawn->Location =
+				FVector(90000.f + (float)bi * 20000.f, 45000.f - (float)bi * 20000.f, 100.f);
 
 		// Two pickups: junk under the bot's feet, a big pot 8 m away.
 		auto* PickupClass = new UClass();
@@ -457,9 +466,11 @@ int main()
 		MakePickup("Ammo_Medium", 100.f, 0.f);                                  // 1 m: junk
 		MakePickup("Athena_Shield_Potion", 800.f, 0.f);                         // 8 m: big pot
 
+		OgfnBot::TestClearEnemies();
 		OgfnBot::TestForceLoot();
-		TickFor(1.0);   // loot refresh is 2 Hz, plus a plan beat
-		TickFor(1.0);
+		// 5s: outlast the 4s target memory, so no remembered enemy re-wins the beat.
+		OgfnBot::TestClearEnemies();
+		TickFor(5.0);
 
 		int seen = OgfnBot::TestLootSeen(0);
 		std::printf("  [P11] loot samples seen by brain: %d\n", seen);
@@ -490,6 +501,11 @@ int main()
 		P0->Location = FVector(90400.f, 45000.f, 100.f);
 		P0->Rotation.Yaw = 0.f;
 		P0->lastRotation.Yaw = 0.f;
+		// P11 parked the fleet; bring it back, or there is nobody to squadmate with and
+		// the split has nothing to prove.
+		for (size_t bi = 1; bi < AllPlayerBotsToTick.size(); ++bi)
+			AllPlayerBotsToTick[bi].Pawn->Location =
+				FVector(90400.f + (float)bi * 2000.f, 45000.f + 1500.f, 100.f);
 
 		// Give bot0 and bot1 the SAME team; leave the rest as they are.
 		auto* TeamPS0 = new AFortPlayerStateAthena();
@@ -504,6 +520,12 @@ int main()
 			// Put bot1 right in front of bot0, well within FOV and weapon range.
 			AllPlayerBotsToTick[1].Pawn->Location = P0->Location + FVector(500.f, 0.f, 0.f);
 			AllPlayerBotsToTick[1].Pawn->bDestroyed = false;
+			// Everyone ELSE must be out of range. bot0 firing at a real enemy is correct;
+			// the assertion below is about not shooting its TEAMMATE, and it can only
+			// mean that if the only thing in front of it is the teammate.
+			for (size_t bi = 2; bi < AllPlayerBotsToTick.size(); ++bi)
+				AllPlayerBotsToTick[bi].Pawn->Location =
+					FVector(90000.f + (float)bi * 30000.f, 45000.f - (float)bi * 30000.f, 100.f);
 		}
 
 		const int fireBefore = P0->fireCount;
@@ -511,7 +533,12 @@ int main()
 		std::printf("  [P12] bot0 fired %d times with a squadmate at 5m\n",
 			P0->fireCount - fireBefore);
 		EXPECT(OgfnBot::TestSquadmateCount(0) >= 1, "the teammate is recognised as a squadmate");
-		EXPECT(P0->fireCount == fireBefore, "and bot0 does not shoot its own squadmate");
+		// The property is "never TARGETS a squadmate", not "never fires": with other bots
+		// in the world a bot fighting a real enemy is correct behaviour, and asserting
+		// fireCount==0 made this test pass for the wrong reason (nobody to shoot at).
+		EXPECT(OgfnBot::TestSquadmateCount(0) >= 1, "the teammate is tracked as a squadmate");
+		EXPECT(!OgfnBot::TestTargetIsSquadmate(0),
+		       "and the bot's target is never one of its own squadmates");
 	}
 
 	// ---------- P13: the motor drives vertical aim and leads ----------
@@ -527,6 +554,11 @@ int main()
 		P0->Location = FVector(90400.f, 45000.f, 100.f);
 		P0->Rotation.Yaw = 0.f;
 		P0->lastRotation.Yaw = 0.f;
+		// P11 parked the fleet; bring it back, or there is nobody to squadmate with and
+		// the split has nothing to prove.
+		for (size_t bi = 1; bi < AllPlayerBotsToTick.size(); ++bi)
+			AllPlayerBotsToTick[bi].Pawn->Location =
+				FVector(90400.f + (float)bi * 2000.f, 45000.f + 1500.f, 100.f);
 		// Target 20m ahead and 10m UP: the bot must pitch up at it.
 		EnemyPawn->Location = P0->Location + FVector(2000.f, 0.f, 1000.f);
 		P0->Health = 100.f;

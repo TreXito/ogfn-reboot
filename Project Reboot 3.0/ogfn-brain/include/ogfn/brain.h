@@ -46,6 +46,10 @@ struct WorldSnapshot {
   int enemies_within_30m = 0;
   int enemies_currently_fighting_each_other = 0;
   bool target_is_visible = false;
+  // Is there a clear firing line to that target RIGHT NOW? The ENGINE answers this with
+  // a trace (the brain must never wallhack), and the Engage score uses it: shooting a
+  // wall is not an engagement, it is noise.
+  bool target_has_line_of_sight = true;
   float target_distance = 0.f;
   float target_health = 100.f;
   bool target_is_reloading = true;
@@ -165,13 +169,27 @@ class Brain {
   double pending_until() const { return reaction_deadline_; }
 
   // Test/tuning hook: pretend the bot was already doing `a` as of `now`.
+  // Force the next plan beat to pick `a`. Used by harness scenarios that need a
+  // specific action without waiting out (or being beaten by) persona luck.
+  //
+  // `next_plan_time_ = now` was wrong: the beat condition is `w.time < next_plan_time_`,
+  // so leaving it equal to the caller's clock commits the bot to whatever `a` is at
+  // that instant and, worse, a scenario that then ticks at the SAME timestamp stays
+  // committed forever and never re-plans. Priming must expire immediately so the next
+  // think() is a real plan beat.
+  // Hard cap on how long one commitment can last, in ticks. At the ~8Hz plan cadence
+  // a normal commitment is a handful of ticks; this is the safety net for a clock that
+  // does not advance. 90 ticks is ~1.5s at 60Hz, which is longer than any real beat but
+  // short enough that a frozen bot recovers inside one fight.
+  static constexpr int kMaxCommittedTicks = 90;
+
   void prime_action(ActionKind a, double now) {
     last_action_ = a;
     has_decided_ = true;
     in_reaction_ = false;
     engaged_ = false;
     reaction_deadline_ = now;
-    next_plan_time_ = now;
+    next_plan_time_ = now - 1.0;   // already past: the next think() plans afresh
   }
 
  private:
@@ -205,6 +223,7 @@ class Brain {
 
   double next_plan_time_ = -1e9;
   bool has_decided_ = false;
+  int committed_ticks_ = 0;   // ticks spent in the current commitment
   ActionKind last_action_ = ActionKind::Idle;
   float last_score_ = 0.f;
 
