@@ -175,9 +175,14 @@
   <ItemGroup>
     <ClCompile Include="ogfn-brain-adapter.cpp" />
     <ClCompile Include="ogfn-brain\src\brain.cpp" />
+    <ClCompile Include="ogfn-brain\src\hitmodel.cpp" />
     <ClCompile Include="ogfn-brain\src\motor.cpp" />
     <ClCompile Include="ogfn-brain\src\perception.cpp" />
     <ClCompile Include="ogfn-brain\src\persona.cpp" />
+    <ClCompile Include="ogfn-brain\src\squad.cpp" />
+    <ClCompile Include="ogfn-brain\src\building.cpp" />
+    <ClCompile Include="ogfn-brain\src\locomotion.cpp" />
+    <ClCompile Include="ogfn-brain\src\loot.cpp" />
     <ClCompile Include="..\vendor\ImGui\imgui.cpp" />
     <ClCompile Include="..\vendor\ImGui\imgui_demo.cpp" />
     <ClCompile Include="..\vendor\ImGui\imgui_draw.cpp" />
