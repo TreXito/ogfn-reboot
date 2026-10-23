@@ -12,6 +12,10 @@ struct EnemySample {
   Vec3 pos;
   float health = 100.f;
   bool line_of_sight = false;
+  // This enemy damaged us since the last observation. The adapter sets it from the
+  // engine's damage events; a shooter you cannot see is the whole reason a player turns
+  // around. Without it a bot walks calmly away from someone shooting it in the back.
+  bool damaged_me = false;
   // A teammate is not an enemy. Without this flag a bot in a squad playlist would
   // track, lock onto and shoot the person standing next to it, which is the single
   // worst tell in the game (and in the current adapter, bots do share teams).
@@ -39,6 +43,12 @@ struct TrackedTarget {
   bool visible = false;
   bool is_teammate = false;
   float health = 100.f;
+  // Most recent time this target hurt us. A remembered aggressor outranks a random
+  // distant body: it is the one that is actually a threat.
+  double last_damaged_me_time = -1e9;
+  bool damaged_me_recently(double now, float window_secs = 3.f) const {
+    return now - last_damaged_me_time <= window_secs;
+  }
   double last_seen_time = -1e9;
   float tracked_for = 0.f;  // consecutive visible seconds
   bool fightable = false;

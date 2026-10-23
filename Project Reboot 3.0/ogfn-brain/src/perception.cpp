@@ -35,8 +35,14 @@ void Perception::update(const Observation& obs, double now) {
     // own squad.
     if (e.is_teammate) continue;
     const float dist = length(e.pos - obs.self_pos);
-    const bool sensed = e.line_of_sight && dist <= cfg_.max_range &&
-                        in_fov(obs.self_pos, obs.self_yaw_deg, e.pos, cfg_.fov_half_deg);
+    // FOV does NOT apply to someone who just shot you. Being hit registers regardless
+    // of where you are looking: that is how a player knows to spin around, and gating it
+    // on the view cone is why a bot walked calmly away from fire coming from behind.
+    // They still have to be within weapon range and have a real line to you.
+    const bool hurt_me = e.damaged_me && dist <= cfg_.max_range && e.line_of_sight;
+    const bool sensed = hurt_me ||
+                        (e.line_of_sight && dist <= cfg_.max_range &&
+                         in_fov(obs.self_pos, obs.self_yaw_deg, e.pos, cfg_.fov_half_deg));
     if (!sensed) continue;
 
     TrackedTarget* t = find(targets_, e.id);
@@ -48,6 +54,7 @@ void Perception::update(const Observation& obs, double now) {
     }
     t->last_seen_pos = e.pos;
     t->health = e.health;
+    if (e.damaged_me) t->last_damaged_me_time = now;
     t->last_seen_time = now;
     t->visible = true;
   }
@@ -71,6 +78,14 @@ void Perception::update(const Observation& obs, double now) {
 }
 
 const TrackedTarget* Perception::nearest(bool require_visible) const {
+  // An aggressor outranks a closer bystander. If someone is shooting you, they are the
+  // target that matters, and picking the nearer body instead means the bot trades shots
+  // with whoever happens to be adjacent while the actual threat keeps firing freely.
+  // last_time_ is the clock update() last saw, so this needs no extra parameter.
+  for (const auto& t : targets_) {
+    if (require_visible && !t.visible) continue;
+    if (t.damaged_me_recently(last_time_)) return &t;
+  }
   const TrackedTarget* best = nullptr;
   float best_dist = 1e9f;
   for (const auto& t : targets_) {

@@ -1252,6 +1252,38 @@ namespace
 	void ResolveShot(Mind& M, AFortPlayerPawnAthena* Pawn, AFortPlayerControllerAthena* Controller,
 	                 const ogfn::TrackedTarget* Target, const ogfn::MotorOutput& Out, double Now);
 
+	// Last damage attribution: victim pawn -> who hit it and when.
+	struct AttackerHit { int id = 0; double at = -1e9; };
+	std::map<uintptr_t, AttackerHit> g_lastAttacker;
+
+	// Record, on the VICTIM's mind, that `AttackerId` hurt it just now. The observation
+	// pass reads this back as EnemySample::damaged_me, which is what lets perception
+	// register a shooter outside the view cone.
+	void MarkAttacker(AFortPlayerPawnAthena* Victim, int AttackerId, double Now)
+	{
+		// Keyed by the live pawn, not by browser index: a respawn replaces the pawn and
+		// an index would then attribute damage to whoever took that slot next.
+		// Bounded: it is a per-pawn map and a long match with respawns would otherwise
+		// grow one entry per pawn address ever seen.
+		if (g_lastAttacker.size() > 512) g_lastAttacker.clear();
+		g_lastAttacker[(uintptr_t)Victim] = { AttackerId, Now };
+	}
+
+	// Who last hurt this pawn, and when. Looked up during the observation pass.
+	bool LastAttacker(AFortPlayerPawnAthena* P, double Now, float window_secs, int* outId)
+	{
+		auto it = g_lastAttacker.find((uintptr_t)P);
+		if (it == g_lastAttacker.end()) return false;
+		// Expiry in BOTH directions. A pawn address is reused after a respawn, so an
+		// entry can look "future" relative to a caller whose clock restarted, and it
+		// would then credit damage for the rest of the match. Treating a negative delta
+		// as stale is what keeps attribution from outliving its fight.
+		const double age = Now - it->second.at;
+		if (age > window_secs || age < 0.0) return false;
+		if (outId) *outId = it->second.id;
+		return true;
+	}
+
 	// Register a real elimination.
 	//
 	// Mirrors what the fork's own ServerSuicideHook does (FortPlayerController.cpp):
@@ -1387,6 +1419,15 @@ namespace
 			M.kills++;
 			LOG_INFO(LogBots, "[ogfn] ELIM bot#{} killed id={} dmg={:.0f}",
 				(int)(&M - &g_minds[0]), Target->id, Total);
+		}
+
+		// TELL THE VICTIM WHO SHOT IT. This adapter drives every point of damage in the
+		// match, so it knows the shooter exactly: no damage-event plumbing needed, and no
+		// guessing from health deltas. Without this the victim's perception never learns
+		// it is under fire from a direction it is not looking at.
+		{
+			const int AttackerId = PawnId(Pawn);
+			MarkAttacker(Victim, AttackerId, Now);
 		}
 
 		if (&M == &g_minds[0] && Now - M.lastResolveLog > 5.0)
@@ -2089,7 +2130,16 @@ void TickAll()
 				continue; // range gate is METERS: raw uu comparison gated at 0.9m and
 			              // silently hid every enemy outside arm's reach (the live n=0).
 			float facing = (dxh / hlen) * FwdX + (dyh / hlen) * FwdY;
-			if (facing < CosHalfFov)
+			// FOV cull, WITH ONE EXCEPTION: whoever just shot us. A shooter behind you
+			// was culled here, one level before perception could ever see it, so the bot
+			// could not know it was under fire from behind at all. Being hit is not a
+			// viewing condition, and the trace budget is still respected below.
+			bool bShotMe = false;
+			{
+				int Aid = 0;
+				bShotMe = LastAttacker(Pawn, Now, 3.0f, &Aid) && Aid == E.id;
+			}
+			if (facing < CosHalfFov && !bShotMe)
 				continue;
 			Cands.push_back({ hlen, Loc, E.id, E.pawn });
 		}
@@ -2117,6 +2167,13 @@ void TickAll()
 			Sample.pos = ToVec(C.loc);
 			Sample.health = C.pawn->GetHealth();
 			Sample.line_of_sight = bLos;
+			// Did this pawn shoot us recently? That is what lets perception register a
+			// shooter outside the view cone.
+			{
+				int Aid = 0;
+				if (LastAttacker(Pawn, Now, 3.0f, &Aid) && Aid == Sample.id)
+					Sample.damaged_me = true;
+			}
 			Obs.enemies.push_back(Sample);
 			if (bLos && C.dist <= 3000.f) // 30 m in engine uu
 				enemiesSeenWithin30++;
@@ -2744,6 +2801,24 @@ int TestFlinches(size_t i) {
 }
 int TestPlanAfterFlinch(size_t i) {
 	return i < g_minds.size() ? g_minds[i].planAfterFlinch : 0;
+}
+// Did bot i ever track someone standing behind it? Proves damage attribution reached
+// perception, not just the damage counter.
+// Attribute a hit from fleet index `attackerIdx` to bot i, exactly as ResolveShot does.
+void TestMarkAttacker(size_t i, size_t attackerIdx) {
+	if (i >= g_minds.size() || attackerIdx >= AllPlayerBotsToTick.size()) return;
+	auto* V = Cast<AFortPlayerPawnAthena>(AllPlayerBotsToTick[i].Controller->GetPawn());
+	auto* A = Cast<AFortPlayerPawnAthena>(AllPlayerBotsToTick[attackerIdx].Controller->GetPawn());
+	if (!V || !A) return;
+	MarkAttacker(V, PawnId(A), HarnessNow());
+	// A real hit hurts: attribution without damage would let a scenario claim "shot from
+	// behind" while the victim's health never moved, and the flinch would never fire.
+	V->SetShield(0.f);
+	V->SetHealth(V->GetHealth() - 15.f);
+}
+void TestClearAttribution() { g_lastAttacker.clear(); }
+int TestTrackedIds(size_t i) {
+	return i < g_minds.size() ? (int)g_minds[i].brain.perception().targets().size() : -1;
 }
 int TestHealEquips(size_t i) {
 	return i < g_minds.size() ? g_minds[i].healsUsed : 0;
