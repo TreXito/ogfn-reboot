@@ -108,6 +108,15 @@ namespace
 		// shots with the same cyclic rate, damage and spread the motor fires with:
 		// grading a rifle's shot with a shotgun's falloff is how a hit model lies.
 		ogfn::WeaponProfile armedProfile;
+		int kills = 0;              // eliminations this bot has been credited with
+		// Health as of last tick, so a DROP can be detected. Being shot is the single
+		// most important event in a fight and the brain had no way to know it happened:
+		// bots stood in the open taking fire with no flinch and no attempt to turn.
+		float lastHealthSeen = 100.f;
+		float lastShieldSeen = 0.f;
+		bool  bInitialisedHealth = false;
+		int   flinchCount = 0;      // reactions to being shot (evidence, not behaviour)
+		int   planAfterFlinch = 0;  // plan beats forced open by taking damage
 		int shotsResolved = 0;      // rounds the hit model actually scored
 		int shotsHit = 0;           // ... of which connected with a body
 		float damageDealt = 0.f;    // total damage this bot has inflicted
@@ -1243,6 +1252,52 @@ namespace
 	void ResolveShot(Mind& M, AFortPlayerPawnAthena* Pawn, AFortPlayerControllerAthena* Controller,
 	                 const ogfn::TrackedTarget* Target, const ogfn::MotorOutput& Out, double Now);
 
+	// Register a real elimination.
+	//
+	// Mirrors what the fork's own ServerSuicideHook does (FortPlayerController.cpp):
+	// ForceKill carries a KillerController, so the kill is attributed to the shooter
+	// rather than being a mysterious disappearance. Health hitting zero on its own does
+	// NOT produce a death report on this build, so without this a lethal fleet still
+	// reports elim=0 and nothing ever reaches "last one standing".
+	void ForceKillPawn(AFortPlayerPawnAthena* Victim, AFortPlayerController* VictimController,
+	                   AFortPlayerControllerAthena* Killer)
+	{
+		if (!Victim || !PawnUsable(Victim))
+			return;
+
+		// Resolved through the pawn, like every other verb in this adapter: FindFunction
+		// works against both the stub harness and the live client's FName table, while
+		// FindObject needs a full path lookup that the stubs do not model.
+		// Looked up per call, not latched in a static: every pawn carries its own
+		// function table, so caching the first lookup from a different pawn would report
+		// "missing" forever (that is exactly what a harness run showed: forceKill 0 -> 0).
+		UFunction* ForceKillFn = Victim->FindFunction("ForceKill");
+		if (!ForceKillFn)
+		{
+			static bool s_warned = false;
+			if (!s_warned)
+			{
+				s_warned = true;
+				LOG_ERROR(LogBots,
+					"[ogfn] ForceKill not found on this build: eliminations cannot register");
+			}
+			return;
+		}
+
+		// Layout copied from the fork's ServerSuicideHook. DeathReason is unused on early
+		// builds but must occupy its slot, so it cannot be dropped from the struct.
+		FGameplayTag DeathReason;
+		struct
+		{
+			FGameplayTag DeathReason;
+			AController* KillerController;
+			AActor* KillerActor;
+		} Params{ DeathReason, (AController*)Killer, nullptr };
+
+		Victim->ProcessEvent(ForceKillFn, &Params);
+		(void)VictimController;
+	}
+
 	// What did that round actually do?
 	//
 	// Fires the brain's hit model against the pawn the motor was aiming at, and lands the
@@ -1268,11 +1323,13 @@ namespace
 		// to a bystander while the intended victim never lost a point. An ambiguous id
 		// means we do not know who was hit, so we decline rather than damage the wrong bot.
 		AFortPlayerPawnAthena* Victim = nullptr;
+		AFortPlayerController* VictimController = nullptr;
 		int matches = 0;
 		for (auto& Other : Others)
 			if (Other.id == Target->id && PawnUsable(Other.pawn))
 			{
 				Victim = Other.pawn;
+				VictimController = Other.controller;
 				++matches;
 			}
 		if (!Victim || matches > 1 || Victim == Pawn)
@@ -1318,6 +1375,19 @@ namespace
 		ogfn::DamageSplit Split = ogfn::apply_damage(Total, Victim->GetShield(), Victim->GetHealth());
 		Victim->SetShield(Split.shield_left);
 		Victim->SetHealth(Split.health_left);
+
+		// HEALTH AT ZERO IS NOT A KILL. Setting the value alone left the bot standing
+		// with 0 hp forever: no elimination, no death report, no killer, so a match full
+		// of lethal bots still reported elim=0 and the "last one standing" logic could
+		// never fire. ForceKill with the shooter's controller is what actually registers
+		// the elimination, and it is the same call the fork's own suicide path uses.
+		if (Split.health_left <= 0.f || Res.target_died)
+		{
+			ForceKillPawn(Victim, VictimController, Controller);
+			M.kills++;
+			LOG_INFO(LogBots, "[ogfn] ELIM bot#{} killed id={} dmg={:.0f}",
+				(int)(&M - &g_minds[0]), Target->id, Total);
+		}
 
 		if (&M == &g_minds[0] && Now - M.lastResolveLog > 5.0)
 		{
@@ -2055,6 +2125,36 @@ void TickAll()
 		M.brain.observe(Obs, Now);
 
 		ogfn::WorldSnapshot W = BuildSnapshot(M, Pawn, Controller, enemiesSeenWithin30, Now);
+
+		// Being shot. The motor has had a flinch model since day one and NOTHING ever
+		// called it, so a bot taking fire behaved exactly like one standing in a field:
+		// no startle, no re-aim toward the attacker. Damage here is measured as health+
+		// shield lost since the last tick, which catches shield-only hits too.
+		{
+			const float nowPool = W.self_health + W.self_shield;
+			if (!M.bInitialisedHealth)
+			{
+				M.bInitialisedHealth = true;
+				M.lastHealthSeen = W.self_health;
+				M.lastShieldSeen = W.self_shield;
+			}
+			const float prevPool = M.lastHealthSeen + M.lastShieldSeen;
+			const float lost = prevPool - nowPool;
+			if (lost > 1.f && M.motor.damage_reacts(Now, lost))
+			{
+				M.flinchCount++;
+				// Re-plan NOW rather than finishing the current intent. That is what a
+				// flinch is: the plan you had stops being the plan. It deliberately does
+				// NOT force Engage, because a bot that always snaps to a fight it cannot
+				// see is its own kind of wrong, and the scoring already weights a close
+				// shooter heavily. Prime with the action it was already doing, which
+				// reopens the plan beat without dictating the answer.
+				M.brain.prime_action(M.decision.action, Now);
+				M.planAfterFlinch++;
+			}
+			M.lastHealthSeen = W.self_health;
+			M.lastShieldSeen = W.self_shield;
+		}
 		W_last_self = W.self_pos;
 		M.lastSnap = W;
 		M.decision = M.brain.think(W);
@@ -2621,6 +2721,14 @@ float TestTotalEnemyHealth() {
 		if (O.pawn && PawnUsable(O.pawn)) t += O.pawn->GetHealth() + O.pawn->GetShield();
 	return t;
 }
+int TestPawnId(void* p) { return PawnId((AFortPlayerPawnAthena*)p); }
+// Drive the elimination path directly. Acquisition is proved by P16; this pins the
+// separate property that reaching zero health produces a REAL ForceKill, which is what
+// makes elim!=0 in a live match.
+void TestForceKill(void* victim, void* killer) {
+	ForceKillPawn((AFortPlayerPawnAthena*)victim, nullptr,
+	              (AFortPlayerControllerAthena*)killer);
+}
 int TestShotsResolved(size_t i) {
 	return i < g_minds.size() ? g_minds[i].shotsResolved : 0;
 }
@@ -2631,6 +2739,12 @@ float TestDamageDealt(size_t i) {
 	return i < g_minds.size() ? g_minds[i].damageDealt : 0.f;
 }
 
+int TestFlinches(size_t i) {
+	return i < g_minds.size() ? g_minds[i].flinchCount : 0;
+}
+int TestPlanAfterFlinch(size_t i) {
+	return i < g_minds.size() ? g_minds[i].planAfterFlinch : 0;
+}
 int TestHealEquips(size_t i) {
 	return i < g_minds.size() ? g_minds[i].healsUsed : 0;
 }

@@ -44,7 +44,9 @@ namespace OgfnBot { void TestClearBurstState(size_t i); void TestSetLadder(float
                   bool TestLootChoice(size_t, int*, float*, float*); int TestSquadmateCount(size_t);
                   void TestClearEnemies(); bool TestTargetIsSquadmate(size_t);
                   float TestTotalEnemyHealth(); int TestShotsResolved(size_t); int TestShotsHit(size_t); float TestDamageDealt(size_t);
-                  int TestHealEquips(size_t); void TestGiveConsumable(size_t, ItemClass, int); } // adapter (OGFN_HARNESS)
+                  int TestHealEquips(size_t); void TestGiveConsumable(size_t, ItemClass, int);
+                  void TestForceKill(void*, void*);
+                  int TestFlinches(size_t); int TestPlanAfterFlinch(size_t); } // adapter (OGFN_HARNESS)
 
 static int g_failures = 0;
 #define EXPECT(cond, msg) do { \
@@ -143,6 +145,7 @@ int main()
 		RegisterFn(Pawn, "AddMovementInput", 48);
 		RegisterFn(Pawn, "StartFire", 0);
 		RegisterFn(Pawn, "K2_SetActorLocation", 64);
+		RegisterFn(Pawn, "ForceKill", 24);   // real param struct is 24 bytes
 
 		auto PC = new AFortPlayerControllerAthena();
 		PC->Inventory = new AFortInventory();
@@ -320,7 +323,6 @@ int main()
 	// reading 0.9 m), nobody perceives anybody and this fails.
 	std::printf("\n-- P7: unit contract, fight inside the deployed ring (5s) --\n");
 	int fireBeforeP7 = FleetFireTotal();
-	int p0BeforeP7 = P0->fireCount;
 	TickFor(5.0);
 	EXPECT(FleetFireTotal() > fireBeforeP7, "bots in range perceive and fight each other (meters boundary holds)");
 	// NOT "bot0 fired": with a working damage path bot0 can be dead inside these five
@@ -717,6 +719,56 @@ int main()
 	// un-park the fleet the P16 scenario destroyed
 	for (size_t bi = 2; bi < AllPlayerBotsToTick.size(); ++bi)
 		AllPlayerBotsToTick[bi].Pawn->bDestroyed = false;
+
+	// ---------- P17: zero health is an ELIMINATION, not a standing corpse ----------
+	// Setting health to 0 without ForceKill leaves the bot standing with 0 hp: no death
+	// report, no killer, elim stays 0, and "last one standing" can never fire. Live
+	// symptom: damage clearly landing while the fleet log reports elim=0 forever.
+	// Acquisition is proved by P16, so this pins the kill path itself.
+	std::printf("\n-- P17: a lethal shot registers a real elimination --\n");
+	{
+		auto* Pv = AllPlayerBotsToTick[1].Pawn;
+		const int before = Pv->forceKillCount;
+		OgfnBot::TestForceKill(Pv, AllPlayerBotsToTick[0].Controller);
+		std::printf("  [P17] forceKill %d -> %d\n", before, Pv->forceKillCount);
+		EXPECT(Pv->forceKillCount > before,
+			"reaching zero health issues a real ForceKill (elimination registers)");
+		OgfnBot::TestForceKill(nullptr, AllPlayerBotsToTick[0].Controller);
+		EXPECT(true, "a vanished victim is handled without a crash");
+	}
+
+	// ---------- P18: being shot actually produces a reaction ----------
+	// Motor::damage_reacts existed from the start and NOTHING ever called it, so a bot
+	// taking fire behaved exactly like one standing in an empty field: no flinch, and no
+	// re-plan away from whatever it was doing. Being shot is the most important event in
+	// a fight, so prove the brain notices.
+	std::printf("\n-- P18: taking damage flinches and re-opens the plan --\n");
+	{
+		world.ND->Connections.v.clear();
+		EnemyPawn->bDestroyed = false;
+		Harness::g_wallUp = false;
+		OgfnBot::TestSetLadder(90000.f, 45000.f, 30000.f);
+		P0->Location = FVector(90000.f, 45000.f, 100.f);
+		P0->Health = 100.f; P0->Shield = 100.f;
+		OgfnBot::TestClearEnemies();
+		const int flinchBefore = OgfnBot::TestFlinches(0);
+		const int planBefore = OgfnBot::TestPlanAfterFlinch(0);
+		// Shoot it. Repeatedly, from full health, so a single unlucky reaction gate
+		// cannot make this pass or fail by chance.
+		for (int k = 0; k < 6; ++k)
+		{
+			P0->Health -= 12.f;
+			TickFor(0.2);
+		}
+		const int flinch = OgfnBot::TestFlinches(0) - flinchBefore;
+		const int plans = OgfnBot::TestPlanAfterFlinch(0) - planBefore;
+		std::printf("  [P18] flinches=%d plansAfterFlinch=%d hp=%.0f\n",
+			flinch, plans, P0->Health);
+		EXPECT(flinch > 0, "taking damage produces a flinch reaction");
+		EXPECT(plans > 0, "and the flinch re-opens the plan instead of finishing the old one");
+		// A reaction is not free: six hits in 1.2s must not mean six reactions.
+		EXPECT(flinch < 6, "but a flinch has a cooldown, not one per damage tick");
+	}
 
 	// ---------- summary ----------
 	std::printf("\n=== summary ===\n");

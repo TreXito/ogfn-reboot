@@ -62,6 +62,13 @@ enum class EDrawDebugTrace { None, ForDuration };
 
 namespace Harness { extern bool g_wallUp; extern float g_wallX; } // sim-defined
 struct UFunction { std::string name; size_t paramsSize = 64; size_t GetPropertiesSize() const { return paramsSize; } };
+// Real NameTypes.h FName; the stub has always used std::string for names, so an alias
+// keeps FindObject/FindFunction call sites identical while giving FGameplayTag the same
+// one-field shape the fork has (GameplayTagContainer.h).
+struct FName { std::string name; };
+// Real GameplayTagContainer.h: FGameplayTag is exactly one FName. It must occupy its slot
+// in the ForceKill param struct even though early builds ignore it.
+struct FGameplayTag { FName TagName; };
 struct UClass { std::string name; };
 
 // Fork's offset finder (reboot.h). Layout constants match the adapter's
@@ -162,6 +169,7 @@ struct ProcessEventRecorder
 	int moveCount = 0;
 	int jumpCount = 0;
 	int fireCount = 0;
+	int forceKillCount = 0;
 	int teleportCount = 0;
 	FVector lastTeleport;
 	FRotator lastRotation;
@@ -175,6 +183,10 @@ inline void UObject::ProcessEvent(UFunction* fn, void* params)
 		return;
 	// default: subclasses record by fn name (wired in sim_main via AActor override)
 }
+
+// Real Controller.h: class AController : public AActor. ForceKill takes one, so the stub
+// needs the type to exist rather than the adapter being written around its absence.
+struct AController : AActor {};
 
 // --- hierarchy the adapter walks ---
 struct AFortPawn : AActor {};
@@ -204,6 +216,10 @@ struct AFortPlayerPawnAthena : AFortPawn, ProcessEventRecorder
 		else if (fn->name == "AddMovementInput" && params) { moveCount++; lastMoveDir = ((FVector*)params)[0]; }
 		else if (fn->name == "Jump") jumpCount++;
 		else if (fn->name == "StartFire") { fireCount++; fireTimes.push_back(HarnessNow()); }
+		// A real elimination. Recorded separately from "health reached 0" because on the
+		// live build those are different things: health at 0 with no ForceKill leaves the
+		// bot standing and the match reports elim=0.
+		else if (fn->name == "ForceKill") { forceKillCount++; }
 		else if (fn->name == "K2_SetActorLocation" && params)
 		{
 			teleportCount++;
