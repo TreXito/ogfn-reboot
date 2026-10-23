@@ -324,6 +324,20 @@ int main()
 	// inside max_range=90m. If uu ever leak through the boundary again (range gate
 	// reading 0.9 m), nobody perceives anybody and this fails.
 	std::printf("\n-- P7: unit contract, fight inside the deployed ring (5s) --\n");
+	// Place the fleet deliberately. Bots now land spread across the whole map (that is
+	// the fix for "50 bots in a 27 m pile"), so a scenario that just ticks and hopes
+	// they meet is testing the drop, not the unit contract. The property under test is
+	// that METERS reach perception at short range: if uu leak through the boundary the
+	// range gate reads 0.9 m and nobody perceives anybody.
+	for (size_t bi = 0; bi < AllPlayerBotsToTick.size(); ++bi)
+	{
+		auto* Pb = AllPlayerBotsToTick[bi].Pawn;
+		Pb->bDestroyed = false;
+		Pb->Location = FVector(90000.f + (float)(bi % 4) * 600.f,
+		                       45000.f + (float)(bi / 4) * 600.f, 100.f);
+		Pb->Health = 100.f; Pb->Shield = 0.f;
+		AllPlayerBotsToTick[bi].Controller->MyPawn = Pb;
+	}
 	int fireBeforeP7 = FleetFireTotal();
 	TickFor(5.0);
 	EXPECT(FleetFireTotal() > fireBeforeP7, "bots in range perceive and fight each other (meters boundary holds)");

@@ -168,6 +168,11 @@ class Brain {
   // misses, which is what makes a recorded match reproducible.
   ShotOutcome resolve_shot(const ShotInput& in) { return hit_.resolve(in, rng_); }
 
+  // The bot's own random stream. Exposed so engine-side code that needs to make a
+  // per-bot decision (a drop time, a landing spot) draws from the SAME stream as the
+  // brain: one seed then replays a whole match, including where it jumped.
+  Rng& rng() { return rng_; }
+
   Decision think(const WorldSnapshot& w);
   void observe(const Observation& obs, double now) { perception_.update(obs, now); }
 

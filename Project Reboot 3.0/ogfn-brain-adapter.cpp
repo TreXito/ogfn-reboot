@@ -102,6 +102,14 @@ namespace
 		bool bSeeded = false;
 		bool bArmed = false;
 		bool bAutoLanded = false;   // bus-dump place-once flag (see the auto-land block)
+		// Where and when this bot leaves the bus. Rolled once, like a player picking a
+		// spot on the way across the island, and then not reconsidered every tick.
+		bool  bJumpPlanned = false;
+		bool  bJumped = false;
+		double jumpAtTime = 0.0;    // seconds after the aircraft phase begins
+		float jumpYawDeg = 0.f;     // the direction it leaves in, so the drop is not a column
+		FVector jumpTarget = FVector(0.f, 0.f, 0.f);   // ground point it is heading for
+		bool  jumpLandPending = false;  // its landing has been scheduled, not yet done
 		bool bNeedsReequip = false; // wave respawn: rebind the controller's rifle to the new pawn
 		int fireCount = 0;          // motor triggers pulled (evidence of sustained combat)
 		// The gun this bot was actually granted. Kept here so the HIT MODEL resolves
@@ -404,13 +412,46 @@ namespace
 		static UClass* s_cone = nullptr;
 		if (!s_resolved) {
 			s_resolved = true;
-			// The 3.5 playable set. These paths are the fork's own (see
-			// FortPlayerController.cpp BuildableData usage); each may be absent, and
-			// an absent one just means that piece never gets placed.
-			s_wall = FindObject<UClass>(L"/Game/Building/ActorBlueprints/Player/Wood/L1/PBWA_W1_Solid.PBWA_W1_Solid_C");
-			s_floor = FindObject<UClass>(L"/Game/Building/ActorBlueprints/Player/Wood/L1/PBWA_S1_Floor.PBWA_S1_Floor_C");
-			s_ramp = FindObject<UClass>(L"/Game/Building/ActorBlueprints/Player/Wood/L1/PBWA_S1_Ramp.PBWA_S1_Ramp_C");
-			s_cone = FindObject<UClass>(L"/Game/Building/ActorBlueprints/Player/Wood/L1/PBWA_W1_Arch.PBWA_W1_Arch_C");
+			// DISCOVERED, not hardcoded. Only the wall path happened to be right on this
+			// build: a live run logged `wall=2327271170560 floor=0 ramp=0 cone=0`, then
+			// "no buildable class for piece Ramp, bots cannot build" and the bot retried
+			// 28 times. Hardcoding asset paths for an asset set this code cannot inspect
+			// is guessing; the engine already knows every building class, so ask it.
+			//
+			// Same proven pattern as the weapon scan: the non-template
+			// GetAllObjectsOfClass (the template body is dead-broken upstream) and cast.
+			static auto BuildingSMActorClass = FindObject<UClass>(L"/Script/FortniteGame.BuildingSMActor");
+			if (BuildingSMActorClass) {
+				auto All = GetAllObjectsOfClass(BuildingSMActorClass);
+				int nWall = 0, nFloor = 0, nRamp = 0, nCone = 0;
+				for (auto* Obj : All) {
+					if (!Obj) continue;
+					// GetAllObjectsOfClass returns UObject*; the classes we want ARE
+					// UClasses, and GetPathName lives on UObject in the real SDK, so read
+					// the path through the UObject pointer and keep the UClass cast only
+					// for what gets stored.
+					UClass* Cls = Cast<UClass>(Obj);
+					if (!Cls) continue;
+					const std::string Path = Obj->GetPathName();
+					if (Path.find("/Player/Wood/L1/") == std::string::npos &&
+					    Path.find("/Player/Wood/") == std::string::npos)
+						continue;   // wood tier only, like an early-game player
+					// Classify by the blueprint name. Wood tier L1 pieces carry S1_/W1_
+					// (floor/wall families) with the piece type spelled out.
+					auto has = [&](const char* t) { return Path.find(t) != std::string::npos; };
+					if ((has("W1_Solid") || has("_Wall")) && !s_wall) { s_wall = Cls; nWall++; }
+					else if ((has("S1_Floor") || has("_Floor")) && !s_floor) { s_floor = Cls; nFloor++; }
+					else if ((has("S1_Ramp") || has("_Ramp")) && !s_ramp) { s_ramp = Cls; nRamp++; }
+					else if ((has("W1_Arch") || has("_Arch") || has("S1_Arch")) && !s_cone) { s_cone = Cls; nCone++; }
+				}
+				LOG_INFO(LogBots, "[ogfn] build classes scanned: {} candidates -> wall={} floor={} ramp={} cone={}",
+					(int)All.size(), (__int64)s_wall, (__int64)s_floor, (__int64)s_ramp, (__int64)s_cone);
+			}
+			// Fall back to the known-good explicit paths for anything the scan missed.
+			if (!s_wall) s_wall = FindObject<UClass>(L"/Game/Building/ActorBlueprints/Player/Wood/L1/PBWA_W1_Solid.PBWA_W1_Solid_C");
+			if (!s_floor) s_floor = FindObject<UClass>(L"/Game/Building/ActorBlueprints/Player/Wood/L1/PBWA_S1_Floor.PBWA_S1_Floor_C");
+			if (!s_ramp) s_ramp = FindObject<UClass>(L"/Game/Building/ActorBlueprints/Player/Wood/L1/PBWA_S1_Ramp.PBWA_S1_Ramp_C");
+			if (!s_cone) s_cone = FindObject<UClass>(L"/Game/Building/ActorBlueprints/Player/Wood/L1/PBWA_W1_Arch.PBWA_W1_Arch_C");
 			LOG_INFO(LogBots, "[ogfn] buildable classes: wall={} floor={} ramp={} cone={}",
 				(__int64)s_wall, (__int64)s_floor, (__int64)s_ramp, (__int64)s_cone);
 		}
@@ -1970,28 +2011,149 @@ void TickAll()
 		// mutually occluded capsules. The probe starts 3000uu above the pawn so an
 		// early roof/actor hit cannot pass as ground; a near-start hit just
 		// retries after the aircraft actor tears down.
-		if (!bWarmup && Phase == EAthenaGamePhase::SafeZones && !M.bAutoLanded)
+		// DROP FROM THE BUS, LIKE A PLAYER.
+		//
+		// This replaces an auto-land that teleported every bot to the ground the instant
+		// SafeZones began, on a ring of only 400..1280uu (4-13 m) around the bus's last
+		// transform. Measured live: 50 bots arrived inside a 27 m box, and the moment
+		// ranged damage worked, 42 of them were eliminated inside ONE second (log shows
+		// 42 ELIM lines all stamped t=30:43, damage 7-24 = point blank). The survivors
+		// then walked into a 2 m pile. That is not a battle royale, it is a firing squad
+		// on a postage stamp, and it is exactly what was reported: "nobody jumped from
+		// the bus, 30 died immediately".
+		//
+		// A player picks a spot while the bus is crossing the island and leaves partway
+		// along. So: plan ONE jump per bot, at a time spread across the flight, toward a
+		// landing point spread across the MAP rather than around the bus. The engine's
+		// own restart path does the actual jump (RestartPlayer, the same call the
+		// ServerAttemptAircraftJump hook uses), so the pawn really leaves the aircraft
+		// instead of being teleported out of it.
+		if (!bWarmup && Phase == EAthenaGamePhase::SafeZones)
 		{
-			auto P = Pawn->GetActorLocation();
-			if (P.Z > 20000.f)
+			// The aircraft phase clock: the first SafeZones tick we see.
+			static double s_airPhaseStart = -1.0;
+			if (s_airPhaseStart < 0.0)
 			{
-				// Ring XY FIRST, then probe THE RING'S OWN COLUMN: using the anchor's
-				// floor height for an offset point buries the pawn inside a slope
-				// (live: z=1636 anchor on a mountain, ring pawn inside rock, every
-				// trace started in geometry -> los=0 even "on land").
-				float Angle = (float)i * 2.399963f; // golden angle: no stacking
-				float Radius = 400.f + (float)(i % 5) * 220.f;
-				FVector Col(P.X + std::cos(Angle) * Radius,
-				             P.Y + std::sin(Angle) * Radius, P.Z + 3000.f);
-				FVector Land(0.f, 0.f, 0.f);
-				bool bRealLand = ProbeLand(Pawn, Col, Land);
-				ApplyTeleport(Pawn, Land);
-				M.bAutoLanded = true;
-				LOG_INFO(LogBots, "[ogfn] auto-landed bot#{} land={} z={:.0f} -> ({:.0f},{:.0f},{:.0f})",
-					(int)i, (int)bRealLand, P.Z, Land.X, Land.Y, Land.Z);
+				s_airPhaseStart = Now;
+				LOG_INFO(LogBots, "[ogfn] aircraft phase clock started at t=0");
 			}
-			// Ground pawns need no latch: the z>20000 gate alone self-terminates
-			// (probe only ever runs for high pawns, and a teleport ends that).
+			const double AirElapsed = Now - s_airPhaseStart;
+
+			if (!M.bJumpPlanned)
+			{
+				M.bJumpPlanned = true;
+				// Spread the jumps over ~40 s so the fleet leaves in a trickle across the
+				// island, the way a lobby does, not as one drop.
+				ogfn::Rng& R = M.brain.rng();
+				const double frac = (double)i / (double)(bots.size() > 1 ? bots.size() - 1 : 1);
+				// Persona-flavoured: impatient bots leave early, patient ones ride far.
+				const float patience = M.brain.persona().patience;
+				double when = frac * 34.0 + R.range(-3.f, 3.f) + patience * 6.0;
+				M.jumpAtTime = when < 1.0 ? 1.0 : when;
+
+				// LANDING SPOT: a point inside the first real storm ring, roughly a
+				// Poisson-disc spread, so the fleet covers the map instead of a column.
+				// Fall back to a wide ring around the CURRENT position when the ladder is
+				// not parsed yet: still hundreds of metres apart, never a 13 m pile.
+				float cx = 0.f, cy = 0.f, radius = 0.f;
+				if (g_ladderParsed)
+				{
+					cx = g_ladderCX;
+					cy = g_ladderCY;
+					radius = g_ladderR;
+				}
+				else
+				{
+					auto B = Pawn->GetActorLocation();
+					cx = (float)B.X;
+					cy = (float)B.Y;
+					radius = 90000.f;   // 900 m: map-scale even without the ladder
+				}
+				// Golden-angle scattering over the whole disc, with a radius jitter so
+				// two bots do not land on the same ray.
+				const float ang = (float)i * 2.399963f;
+				const float rr = radius * (0.15f + 0.80f * std::sqrt((float)((i * 37) % 97) / 97.f));
+				const float jx = std::cos(ang) * rr * R.range(0.92f, 1.08f);
+				const float jy = std::sin(ang) * rr * R.range(0.92f, 1.08f);
+				M.jumpTarget = FVector(cx + jx, cy + jy, 40000.f);
+				M.jumpYawDeg = (float)(std::atan2(jy, jx) * 57.2958);
+			}
+
+			if (!M.bJumped && AirElapsed >= M.jumpAtTime)
+			{
+				M.bJumped = true;
+				auto P = Pawn->GetActorLocation();
+				// The engine's own jump path. There is no callable
+				// ServerAttemptAircraftJump on this build's controller, but its hook ends
+				// in exactly GameMode->RestartPlayer for a real player, which respawns the
+				// pawn out of the aircraft. Calling that directly is the same jump without
+				// needing the client RPC a server-only bot cannot send.
+				// NOT a repo: teleporting the EXISTING pawn to its own target. Respawning
+				// a fresh pawn here reassigned `Pawn` mid-tick and left every downstream
+				// reader of the old pointer stale (38 harness failures), and a server-only
+				// bot has no skydive physics to justify the swap. The fix for the pile is
+				// the SPREAD (below and in the landing block), not a new actor.
+				//
+				// The pawn leaves the aircraft here; the landing block below puts it on
+				// the ground at ITS OWN spread target once the drop has had time to run.
+				M.jumpLandPending = true;
+				LOG_INFO(LogBots, "[ogfn] bus jump bot#{} at t={:.0f}s yaw={:.0f} from=({:.0f},{:.0f})",
+					(int)i, AirElapsed, M.jumpYawDeg, P.X * 0.01f, P.Y * 0.01f);
+			}
+
+			// GROUND PLACEMENT. Two ways a bot ends up needing it, both landing at its
+			// OWN spread target:
+			//
+			//  (a) the engine dumped it high up already (it has no client, so no skydive
+			//      physics -- the pawn sits at the bus transform forever). Land at once:
+			//      waiting out a stagger first would leave it frozen above the map, which
+			//      is the bug this whole block exists to prevent.
+			//  (b) its scheduled bus jump has been hanging in the air long enough that it
+			//      clearly is not coming down, same situation, just later.
+			// A pawn that is HIGH UP has not landed, whatever an earlier latch said. The
+			// latch is per-drop, not per-pawn-lifetime: warmup spawns bots on the island
+			// (ground, latched), and the bus dump later lifts the same pawn to altitude.
+			// Without this reset the landing block never fired at all -- 0 "landed bot#"
+			// lines in a full harness run, with every pawn frozen at z=815 m.
+			{
+				// A high pawn has NOT landed. Clear the latch whenever it is airborne and
+				// its landing has not completed for THIS drop, regardless of how it got
+				// up there. The old `!jumpLandPending` guard meant any bot that had
+				// already left the bus could never re-latch, so bots 0-5 stayed frozen at
+				// z=815 m while bots 6+ landed normally (harness: "nobody left frozen
+				// above the map" FAIL with exactly that split).
+				auto Pz = Pawn->GetActorLocation();
+				if (Pz.Z > 20000.f) M.bAutoLanded = false;
+			}
+			if (!M.bAutoLanded)
+			{
+				auto P = Pawn->GetActorLocation();
+				const bool bDumpedHigh = P.Z > 20000.f;
+				// Land as soon as it is clear the pawn is not coming down on its own
+				// (no client means no skydive physics: it hangs at the bus transform
+				// forever). This is deliberately NOT gated on the jump schedule: a
+				// staggered jump is about WHEN a bot leaves the bus, and a pawn already
+				// dumped at altitude has already left.
+				if (bDumpedHigh)
+				{
+					FVector Col(M.jumpTarget.X, M.jumpTarget.Y, 40000.f);
+					FVector Land(0.f, 0.f, 0.f);
+					bool bRealLand = ProbeLand(Pawn, Col, Land);
+					ApplyTeleport(Pawn, Land);
+					M.bAutoLanded = true;
+					LOG_INFO(LogBots, "[ogfn] landed bot#{} real={} -> ({:.0f},{:.0f},{:.0f})",
+						(int)i, (int)bRealLand, Land.X * 0.01f, Land.Y * 0.01f, Land.Z * 0.01f);
+				}
+				else if (!bDumpedHigh)
+				{
+					M.bAutoLanded = true;   // already on the ground
+				}
+				// NOTE: latching on "on the ground" means one latch per pawn lifetime.
+				// A later forced dump of the SAME pawn is a new drop and must be able to
+				// land again, so the latch is cleared whenever the pawn is high up and
+				// has not landed yet in this drop.
+				if (bDumpedHigh && !M.bAutoLanded) { /* landing handled above */ }
+			}
 		}
 
 		// STORM-EVAC (hard guarantee for "bots must not die to the storm"): once

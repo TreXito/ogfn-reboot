@@ -89,7 +89,11 @@ extern inline bool bDebugPrintSwapping = false;
 extern inline bool bEnableBotTick = true;
 extern inline bool bZoneReversing = false;
 extern inline bool bEnableCombinePickup = false;
-extern inline int AmountOfBotsToSpawn = 50;
+// 99 bots, not 50. With the solo host that fills GameSession->MaxPlayers = 100
+// exactly (FortGameModeAthena.cpp:808), which is a real lobby instead of a half-full
+// one. Bots spawn from warmup player starts on a loop, so the count is not limited by
+// how many starts the map happens to carry.
+extern inline int AmountOfBotsToSpawn = 99;
 extern inline int WarmupRequiredPlayerCount = 1;
 extern inline bool bEnableRebooting = false;
 extern inline bool bEngineDebugLogs = false;
