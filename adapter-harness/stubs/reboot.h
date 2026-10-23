@@ -196,7 +196,7 @@ struct AFortPlayerPawnAthena : AFortPawn, ProcessEventRecorder
 	AFortPlayerPawnAthena() { s_pawns.push_back(this); }
 	float Health = 100.f, Shield = 100.f;
 	float GetHealth() { return Health; }
-	FVector K2_GetActorLocation() { return Location; }
+	FVector GetActorLocation() { return Location; }
 	float GetShield() { return Shield; }
 	// Present on the real AFortPawn (FortPawn.h: SetHealth/SetShield/SetMaxShield).
 	// A stub without them does not mirror the client, it merely agrees with whatever

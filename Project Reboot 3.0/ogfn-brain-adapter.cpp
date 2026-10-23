@@ -1367,11 +1367,15 @@ namespace
 		if (!Victim || matches > 1 || Victim == Pawn)
 			return;
 
-		const FVector SelfLoc = Pawn->K2_GetActorLocation();
-		const FVector VictimLoc = Victim->K2_GetActorLocation();
+		// NON-const FVector on purpose: this fork's operator+ is non-const, so a
+		// `const FVector` left operand does not compile (same error as the first live
+		// build). K2_GetActorLocation does not exist here either; Actor.h declares
+		// plain GetActorLocation().
+		FVector SelfLoc = Pawn->GetActorLocation();
+		FVector VictimLoc = Victim->GetActorLocation();
 		// Chest height, not feet: a capsule measured from the ground plane puts the
 		// whole body above the ray and every shot reads as a miss.
-		const FVector AimPoint = VictimLoc + FVector(0.f, 0.f, 60.f);
+		FVector AimPoint = VictimLoc + FVector(0.f, 0.f, 60.f);
 
 		ogfn::ShotInput In;
 		In.from = ToVec(SelfLoc);
