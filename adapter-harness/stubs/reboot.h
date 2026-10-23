@@ -43,8 +43,8 @@ struct FVector
 	FVector operator-(const FVector& A) const { return { X - A.X, Y - A.Y, Z - A.Z }; }
 };
 
-struct FRotator { float Pitch, Yaw, Roll; };
 struct FQuat { float X, Y, Z, W; FQuat(float x = 0, float y = 0, float z = 0, float w = 1) : X(x), Y(y), Z(z), W(w) {} };
+struct FRotator { float Pitch, Yaw, Roll; FQuat Quaternion() const { return FQuat(); } };
 struct FTransform { FQuat Rotation; FVector Translation; FVector Scale3D; };
 struct FLinearColor { float R = 0, G = 0, B = 0, A = 0; };
 struct FGuid { int v = 0; };
@@ -159,6 +159,13 @@ struct AActor : UObject
 
 	FVector GetActorLocation() { return Location; }
 	FRotator GetActorRotation() { return Rotation; }
+	// Real AActor (Actor.h:38, Actor.h:49). Needed because the adapter makes a spawned
+	// building replicate; a stub without them would have let code that never touches the
+	// network layer look fine, which is the failure mode this harness exists to avoid.
+	int flushNetDormancyCount = 0;
+	int forceNetUpdateCount = 0;
+	void FlushNetDormancy() { flushNetDormancyCount++; }
+	void ForceNetUpdate() { forceNetUpdateCount++; }
 	bool IsActorBeingDestroyed() const { return bDestroyed; }
 };
 
@@ -368,12 +375,30 @@ struct UNetDriver
 	TArray<UNetConnection*>& GetClientConnections() { return Connections; }
 };
 
+// Forward-declared so the templated SpawnActor below can be declared before the
+// building types exist; the adapter includes BuildingSMActor-equivalent stubs.
+struct ABuildingSMActorStubTag {};
+
 struct UWorld : UObject
 {
 	using UObject::UObject;
 	virtual UObject* GetGameState() { return nullptr; }
 	virtual UNetDriver* GetNetDriver() { return nullptr; }
 	virtual UObject* GetGameMode() { return nullptr; }
+
+	// Real UWorld::SpawnActor<T>(Class, FTransform). The harness needs it because the
+	// adapter's build path spawns a real actor; without it, that path was compiled out
+	// under OGFN_HARNESS and its replication calls were never tested.
+	static inline int s_spawnCalls = 0;
+	template <typename T>
+	T* SpawnActor(UClass* Cls, const FTransform& Xf)
+	{
+		if (!Cls) return nullptr;
+		s_spawnCalls++;
+		T* A = new T();
+		A->Location = Xf.Translation;
+		return A;
+	}
 };
 
 namespace Harness

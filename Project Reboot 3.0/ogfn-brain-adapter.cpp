@@ -32,6 +32,9 @@
 #include "FortSafeZoneIndicator.h"
 #include "FortWorldItemDefinition.h"
 #include "FortPickup.h"
+// Explicit: the build path spawns ABuildingSMActor, so this must not rely on a
+// transitive include. It compiled before only because another header pulled it in.
+#include "BuildingSMActor.h"
 #include "KismetSystemLibrary.h"
 #ifdef OGFN_HARNESS
 namespace OgfnLocker { void AutoApplyOnce(); }  // provided by the harness stub
@@ -206,6 +209,9 @@ namespace
 
 	std::vector<Mind> g_minds;                 // index-parallel to AllPlayerBotsToTick
 	bool g_zoneTruth = false;      // is the snapshot ring real (ladder or engine field)?
+	// How many placed pieces were pushed to clients. A piece that exists only on the
+	// server is invisible to the player: the exact "builds not matched" report.
+	int g_buildNetPushed = 0;
 	bool g_ladderParsed = false;   // engine's 9-ring storm ladder read from its log
 	float g_ladderCX = 0.f, g_ladderCY = 0.f, g_ladderR = 0.f; // uu, innermost ring >0
 	int g_ladderTries = 0;
@@ -490,7 +496,6 @@ namespace
 		if (!Piece.valid)
 			return false;
 
-#ifndef OGFN_HARNESS
 		auto World = GetWorld();
 		if (!World)
 			return false;
@@ -509,13 +514,23 @@ namespace
 		// Infinite materials are already on for bots; the engine still wants the
 		// actor initialized as player-placed or it decays.
 		Piece1->InitializeBuildingActor(Controller, Piece1, true);
-		return true;
-#else
-		// Harness: record the intent so a scenario can assert pieces reach the world.
+
+		// MAKE THE CLIENT SEE IT. A freshly spawned actor is dormant and unnotified, so
+		// it exists on the server and nowhere else: the player watches a bot swing at
+		// nothing and their own view never gains the wall. This is the "builds not
+		// matched with server" report. The fork's own spawn path does exactly these two
+		// calls (FortGameModeAthena.h:198 FlushNetDormancy + ForceNetUpdate) and the
+		// adapter was doing neither.
+		Piece1->FlushNetDormancy();
+		Piece1->ForceNetUpdate();
+		++g_buildNetPushed;
+		// Harness: record the intent too, so a scenario can assert which pieces reached
+		// the world. This used to be an #else branch that skipped the real spawn
+		// entirely, which meant the replication calls were NEVER exercised by the
+		// harness and a regression there would have shipped silently.
 		if (g_buildRecorder)
 			g_buildRecorder(In.piece, In.yaw_deg, In.edit);
 		return true;
-#endif
 	}
 
 	void ApplyJump(AFortPlayerPawnAthena* Pawn)
@@ -2205,7 +2220,14 @@ void TickAll()
 			auto Rp = Pawn->GetActorLocation();
 			const float dToZone = std::sqrt(((float)Rp.X - g_ladderCX) * ((float)Rp.X - g_ladderCX)
 			                              + ((float)Rp.Y - g_ladderCY) * ((float)Rp.Y - g_ladderCY));
-			const bool bNoProgress = (M.stepOk + M.stepBlk) > 300 && M.stepBlk > M.stepOk * 2;
+			// Evidence, not a hunch. 300 steps is ~10s at 30Hz, and requiring 2x more
+			// blocked than moved means genuinely pinned, not just bumping a fence on the
+			// way to the ring. Also require that several committed detours have already
+			// failed: with the detour fixed above, a bot that is merely walking around an
+			// obstacle must never be teleported, because teleporting is what the user
+			// saw as "moving from one position and resetting".
+			const bool bNoProgress = (M.stepOk + M.stepBlk) > 300 && M.stepBlk > M.stepOk * 2
+			                         && M.stuckEpisodes >= 4;
 			if (bNoProgress && dToZone > g_ladderR + 500.f && Pawn->GetHealth() > 0.f)
 			{
 				const float ang = (float)i * 2.399963f;
@@ -2783,8 +2805,29 @@ void TickAll()
 					float step2 = kBotWalkSpeed * dt * 1.15f;
 					FVector P2 = Pawn->GetActorLocation();
 					FVector Detour(P2.X + std::cos(M.stuckAng) * step2,
-					               P2.Y + std::sin(M.stuckAng) * step2, P2.Z + 30.f);
-					ApplyTeleportEx(Pawn, Detour, /*bSweep*/ true);
+					               P2.Y + std::sin(M.stuckAng) * step2, P2.Z);
+					// KEEP IT ON THE FLOOR. This used to add a flat +30uu to Z every
+					// tick, which walked the pawn up an invisible staircase while it
+					// failed to move horizontally: "infinitely moving from one position
+					// and resetting". The detour is a horizontal sidestep; the ground
+					// probe below re-seats it like any other step.
+					FHitResult* DG = nullptr;
+					UKismetSystemLibrary::LineTraceSingle(Pawn,
+						FVector(Detour.X, Detour.Y, Detour.Z + 300.f),
+						FVector(Detour.X, Detour.Y, Detour.Z - 40000.f),
+						ETraceTypeQuery::TraceTypeQuery1, false, TArray<AActor*>(),
+						EDrawDebugTrace::None, true, FLinearColor(), FLinearColor(), 0.f, &DG);
+					if (DG && DG->IsBlockingHit())
+					{
+						FVector DL = DG->GetLocation();
+						if (DL.Z >= Detour.Z - 400.f && DL.Z < Detour.Z + 300.f)
+							Detour.Z = DL.Z + 100.f;
+					}
+					// And a detour that does NOT move is a failed detour. Counting it as
+					// progress let a bot burn 30 ticks against a wall, then get teleported
+					// by PROGRESS-RESCUE, which is the reset the user saw.
+					if (!ApplyTeleportEx(Pawn, Detour, /*bSweep*/ true))
+						M.stuckPhase = 0;   // give up early; pick a new angle next tick
 				}
 			}
 		}
@@ -2983,6 +3026,7 @@ void TestMarkAttacker(size_t i, size_t attackerIdx) {
 	V->SetHealth(V->GetHealth() - 15.f);
 }
 void TestClearAttribution() { g_lastAttacker.clear(); }
+int TestBuildNetPushed() { return g_buildNetPushed; }
 int TestTrackedIds(size_t i) {
 	return i < g_minds.size() ? (int)g_minds[i].brain.perception().targets().size() : -1;
 }

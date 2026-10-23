@@ -18,6 +18,7 @@
 #include "stubs/KismetSystemLibrary.h"
 // Brain types for the assertions (placing pieces, reporting goals).
 #include "ogfn/ogfn_bots.h"
+#include "stubs/BuildingSMActor.h"
 #include "stubs/FortPickup.h"
 #include "stubs/FortPlayerStateAthena.h"
 using namespace ogfn;
@@ -47,7 +48,7 @@ namespace OgfnBot { void TestClearBurstState(size_t i); void TestSetLadder(float
                   int TestHealEquips(size_t); void TestGiveConsumable(size_t, ItemClass, int);
                   void TestForceKill(void*, void*);
                   int TestFlinches(size_t); int TestPlanAfterFlinch(size_t);
-                  int TestTrackedIds(size_t); void TestMarkAttacker(size_t, size_t);
+                  int TestTrackedIds(size_t); int TestBuildNetPushed(); void TestMarkAttacker(size_t, size_t);
                   void TestClearAttribution(); } // adapter (OGFN_HARNESS)
 
 static int g_failures = 0;
@@ -136,6 +137,20 @@ int main()
 	NamedClass(L"/Script/FortniteGame.FortPickup", "FortPickup");
 
 	// Fleet: 20 bots facing +X (yaw 0 = +X in UE convention).
+	// Building classes MUST be registered before the first build attempt: the adapter
+	// resolves them once and latches (s_resolved), so registering them later left the
+	// scan empty and the placement path returned before spawning anything. That is how
+	// the replication calls went unexercised ("pushed 0 of 134").
+	for (auto* BP : { L"/Game/Building/ActorBlueprints/Player/Wood/L1/PBWA_W1_Solid.PBWA_W1_Solid_C",
+	                  L"/Game/Building/ActorBlueprints/Player/Wood/L1/PBWA_S1_Floor.PBWA_S1_Floor_C",
+	                  L"/Game/Building/ActorBlueprints/Player/Wood/L1/PBWA_S1_Ramp.PBWA_S1_Ramp_C",
+	                  L"/Game/Building/ActorBlueprints/Player/Wood/L1/PBWA_W1_Arch.PBWA_W1_Arch_C" })
+	{
+		auto* BC = new UClass();
+		BC->name = "PBWA_wood_L1";
+		Harness::g_namedClasses[BP] = BC;
+	}
+
 	for (int i = 0; i < 20; i++)
 	{
 		auto Pawn = new AFortPlayerPawnAthena();
@@ -438,6 +453,14 @@ int main()
 		EXPECT(!placed.empty(), "a bot under fire places pieces (build_wall is wired)");
 		EXPECT(walls > 0, "and the pieces are walls, not something arbitrary");
 		EXPECT(floors > 0, "the box gets a roof");
+		// REPLICATION. A piece that only exists on the server is invisible to the player,
+		// which is the live report "the builds were not matched with server". Every piece
+		// the builder placed must have been flushed out of dormancy and forced to update.
+		const int pushed = OgfnBot::TestBuildNetPushed();
+		std::printf("  [P10] pieces pushed to clients: %d of %d\n", pushed, (int)placed.size());
+		EXPECT(pushed > 0, "placed pieces are flushed + forced to update (clients can see them)");
+		EXPECT(pushed >= (int)placed.size(),
+			"EVERY placed piece was pushed, not just the first");
 		EXPECT(edits > 0, "the box gets a window edit, so the bot can shoot out of it");
 	}
 
