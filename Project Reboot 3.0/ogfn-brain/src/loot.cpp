@@ -44,8 +44,15 @@ ItemClass classify_item(const std::string& name) {
   // Order matters. "shotgun" before any generic gun match, "shield" before
   // "potion" because both big and small shields carry Potion in the path, and the
   // size is in the same string.
-  if (has(n, "athena_small_shield") || has(n, "smallshield")) return ItemClass::ShieldPotion;
-  if (has(n, "athena_shield_potion") || has(n, "shieldpotion") || has(n, "shield_potion"))
+  // Shields by EVERY spelling the game has used. Shipping only "athena_shield_potion"
+  // meant a real 3.5 asset called Athena_ShieldMedium classified as Unknown, and an
+  // Unknown pickup is invisible to the valuator: the bot walks past full shield pots.
+  if (has(n, "small_shield") || has(n, "smallshield") || has(n, "shieldsmall") ||
+      has(n, "shield_small"))
+    return ItemClass::ShieldPotion;
+  if (has(n, "shield_potion") || has(n, "shieldpotion") || has(n, "shieldmedium") ||
+      has(n, "shield_medium") || has(n, "shieldlarge") || has(n, "shield_large") ||
+      has(n, "shieldbig") || has(n, "shield_big"))
     return ItemClass::ShieldBig;
   if (has(n, "medkit") || has(n, "med_kit")) return ItemClass::Medkit;
   if (has(n, "bandage")) return ItemClass::Bandage;
@@ -53,7 +60,12 @@ ItemClass classify_item(const std::string& name) {
   if (has(n, "shotgun")) return ItemClass::Shotgun;
   if (has(n, "sniper")) return ItemClass::Sniper;
   if (has(n, "rocket") || has(n, "grenade") || has(n, "launcher")) return ItemClass::Explosive;
-  if (has(n, "smg") || has(n, "machinegun") || has(n, "machine_gun") || has(n, "rifle"))
+  // "assault" matters more than "rifle": the real 3.5 paths are WID_Assault_Auto_,
+  // WID_Assault_Burst_, WID_Assault_Dragon_ and so on, and NOT ONE of them contains
+  // the word "rifle". Without this every assault rifle in the game classified as
+  // Unknown, so bots never valued one on the floor and never armed from loot.
+  if (has(n, "smg") || has(n, "machinegun") || has(n, "machine_gun") ||
+      has(n, "rifle") || has(n, "assault"))
     return ItemClass::AssaultRifle;
   if (has(n, "pistol")) return ItemClass::Pistol;
 

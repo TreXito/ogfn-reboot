@@ -49,6 +49,8 @@ namespace OgfnBot { void TestClearBurstState(size_t i); void TestSetLadder(float
                   void TestForceKill(void*, void*);
                   int TestFlinches(size_t); int TestPlanAfterFlinch(size_t);
                   int TestTrackedIds(size_t); int TestBuildNetPushed(); void TestMarkAttacker(size_t, size_t);
+                  int TestPickupsTaken(size_t); int TestLootSpotCount(); int TestPickupCompletions();
+                  void TestClearConsumables(size_t); void TestGrantWeapons(); int TestArmedByFallback();
                   void TestClearAttribution(); } // adapter (OGFN_HARNESS)
 
 static int g_failures = 0;
@@ -204,7 +206,11 @@ int main()
 	world.GS->Phase = EAthenaGamePhase::SafeZones;
 
 	// ---------- P1: lobby, no enemies ----------
+	// Bots now land EMPTY-HANDED and arm themselves by looting (a battle royale where
+	// everyone spawns with an assault rifle has no early game). A scenario that wants
+	// bots to shoot therefore has to arm them explicitly.
 	std::printf("\n-- P1: no enemies, act enabled (2s) --\n");
+	OgfnBot::TestGrantWeapons();
 	TickFor(2.0);
 
 	int armAdds = 0;
@@ -885,6 +891,66 @@ int main()
 		// then be measuring a fight they never asked for, which made P13 flaky.
 		OgfnBot::TestClearAttribution();
 		P0->Health = 100.f; P0->Shield = 100.f;
+	}
+
+	// ---------- P20: a bot walking to loot actually PICKS IT UP ----------
+	// The brain deciding "Loot" is worthless if the item is never collected. Before this
+	// the adapter scanned loot, walked the bot to the spot, and took nothing: bots stood
+	// on top of a rifle and left empty-handed, which deletes the whole early game.
+	std::printf("\n-- P20: walking to loot collects it --\n");
+	{
+		world.ND->Connections.v.clear();
+		EnemyPawn->bDestroyed = true;
+		Harness::g_wallUp = false;
+		OgfnBot::TestSetLadder(90000.f, 45000.f, 30000.f);
+		P0->Location = FVector(90000.f, 45000.f, 100.f);
+		P0->Health = 100.f; P0->Shield = 0.f;   // no shield: a big pot is worth the walk
+		P0->Rotation.Yaw = 0.f;
+		P0->lastRotation.Yaw = 0.f;
+		for (size_t bi = 1; bi < AllPlayerBotsToTick.size(); ++bi)
+		{
+			AllPlayerBotsToTick[bi].Pawn->bDestroyed = true;
+			AllPlayerBotsToTick[bi].Pawn->Location =
+				FVector(90000.f + (float)bi * 500000.f, 45000.f, 100.f);
+		}
+		OgfnBot::TestClearEnemies();
+
+		// No consumables: P15 handed bot0 a shield potion, and at 0 shield the brain
+		// correctly prefers Heal over walking to a pot. Healing with nothing to drink is
+		// impossible, so with the inventory cleared the only sensible move is to loot.
+		OgfnBot::TestClearConsumables(0);
+
+		// One pickup 2 m in front of bot0: inside reach, on the floor. It must be
+		// REGISTERED in the class map, or the loot scan (which enumerates actors by
+		// class) cannot see it and the test silently measures nothing.
+		auto* Loot = new AFortPickup();
+		Loot->Location = FVector(90000.f + 200.f, 45000.f, 100.f);
+		auto* Def = new UFortWorldItemDefinition();
+		Def->name = "/Game/Items/Consumables/Shields/Athena_Shield_Potion.Athena_Shield_Potion";
+		auto* Ent = new FFortItemEntry();
+		Ent->Definition = Def;
+		Ent->Count = 1;
+		Loot->Entry = Ent;
+		{
+			auto* PC2 = Harness::g_namedClasses[L"/Script/FortniteGame.FortPickup"];
+			if (PC2) Harness::g_classObjects[PC2].push_back(Loot);
+		}
+		OgfnBot::TestForceLoot();
+		TickFor(0.2);
+		std::printf("  [P20] loot spots seen=%d\n", OgfnBot::TestLootSpotCount());
+		EXPECT(OgfnBot::TestLootSpotCount() > 0, "the loot scan sees the pickup");
+
+		const int takenBefore = OgfnBot::TestPickupsTaken(0);
+		const int doneBefore = OgfnBot::TestPickupCompletions();
+		// Let the brain choose Loot and the bot walk in.
+		for (int k = 0; k < 30 * 8 && OgfnBot::TestPickupsTaken(0) == takenBefore; ++k)
+			TickFor(1.0 / 30.0);
+		const int taken = OgfnBot::TestPickupsTaken(0) - takenBefore;
+		const int done = OgfnBot::TestPickupCompletions() - doneBefore;
+		std::printf("  [P20] pickupsTaken=%d completions=%d destroyed=%d\n",
+			taken, done, (int)Loot->bDestroyed);
+		EXPECT(taken > 0, "the bot that walks to loot actually takes it");
+		EXPECT(done > 0, "and the pickup completes (the item leaves the world)");
 	}
 
 	// ---------- summary ----------

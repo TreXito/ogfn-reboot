@@ -197,7 +197,17 @@ struct AController : AActor {};
 
 // --- hierarchy the adapter walks ---
 struct AFortPawn : AActor {};
-struct AFortPlayerPawnAthena : AFortPawn, ProcessEventRecorder
+struct AFortPickup;
+// Real FortPlayerPawn.h:31 (AFortPlayerPawn : AFortPawn) and :52. The pickup RPC lives
+// here, not on the pickup, because it is the PAWN that takes the item.
+struct AFortPlayerPawn : AFortPawn
+{
+	static inline int s_handleCalls = 0;
+	static void ServerHandlePickupHook(AFortPlayerPawn* Pawn, AFortPickup* Pickup,
+	                                   float InFlyTime, FVector InStartDirection,
+	                                   bool bPlayPickupSound);
+};
+struct AFortPlayerPawnAthena : AFortPlayerPawn, ProcessEventRecorder
 {
 	static inline std::vector<AFortPlayerPawnAthena*> s_pawns;
 	AFortPlayerPawnAthena() { s_pawns.push_back(this); }
@@ -309,12 +319,17 @@ struct AFortInventory : UObject
 	FFortItemList& GetItemList() { return List; }
 
 	template <typename DefT>
-	std::pair<std::vector<UFortItem*>, std::vector<UFortItem*>> AddItem(DefT*, bool* bShouldUpdate, int = 1, int = -1, bool = false)
+	std::pair<std::vector<UFortItem*>, std::vector<UFortItem*>> AddItem(DefT* Def, bool* bShouldUpdate, int Count = 1, int = -1, bool = false)
 	{
 		adds++;
 		if (bShouldUpdate) *bShouldUpdate = true;
 		auto Item = new UFortItem();
 		Item->name = "ItemInstance";
+		// The real AddItem hands the instance the definition it was given. Dropping it
+		// made every granted weapon unidentifiable by name, so anything that armed a bot
+		// by re-reading the inventory (equip-the-best-you-carry) equipped nothing.
+		Item->Entry.Definition = Def;
+		Item->Entry.Count = Count;
 		List.ItemInstances.push_back(Item);
 		return { { Item }, {} };
 	}

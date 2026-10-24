@@ -70,6 +70,8 @@ std::vector<std::pair<int, int>> TestBuildLog();
 void TestForceLoot();
 // Behavior-sim hook: put a consumable in a bot's inventory so the heal path can run.
 void TestGiveConsumable(size_t i, ogfn::ItemClass cls, int count);
+void TestClearConsumables(size_t i);
+void TestGrantWeapons(); int TestArmedByFallback();
 int TestSquadmateCount(size_t i);
 int TestHealEquips(size_t i);
 int TestLootSeen(size_t i);
@@ -86,6 +88,11 @@ namespace
 		constexpr double kWaveCadenceSecs = 2.0;
 		constexpr int kWaveMaxAttempts = 30;
 	constexpr double kLootRefreshSecs = 0.5;
+	// How long a bot may fight with no weapon before it is handed one. Long enough that
+	// looting is the normal way to arm (2.5 minutes of early game), short enough that a
+	// barren arena never turns into a fistfight.
+	constexpr double kLootGraceSecs = 150.0;
+	int g_armedByFallback = 0;
 	constexpr float kMoveMinDist = 2.5f;      // meters: decision points closer than this are "hold here"
 	constexpr float kTraceEyeOffset = 60.f;    // trace between heads, not feet
 
@@ -120,6 +127,14 @@ namespace
 		// grading a rifle's shot with a shotgun's falloff is how a hit model lies.
 		ogfn::WeaponProfile armedProfile;
 		int kills = 0;              // eliminations this bot has been credited with
+		// Loot actually taken. The brain deciding to loot is worthless if the item is
+		// never collected, so this counter is the evidence that the hand moved.
+		// When this bot first entered combat. Anchors the loot-then-fight grace period.
+		double firstCombatAt = -1.0;
+		bool bArmedByLoot = false;  // got a gun off the ground vs handed one
+		AFortPickup* lastPickupActor = nullptr;
+		double lastPickupAt = -1e9;
+		int pickupsTaken = 0;
 		// Health as of last tick, so a DROP can be detected. Being shot is the single
 		// most important event in a fight and the brain had no way to know it happened:
 		// bots stood in the open taking fire with no flinch and no attempt to turn.
@@ -264,6 +279,9 @@ namespace
 		ogfn::ItemClass Cls;
 		int Count;
 		int Id;
+		// The live actor. Without this the scan identified loot but had nothing to
+		// actually pick up, which is why bots walked to items and stared at them.
+		AFortPickup* Pickup = nullptr;
 	};
 	std::vector<LootSpot> g_lootSpots;
 	double g_lootNextRefresh = -1e9;
@@ -531,6 +549,68 @@ namespace
 		if (g_buildRecorder)
 			g_buildRecorder(In.piece, In.yaw_deg, In.edit);
 		return true;
+	}
+
+	// TAKE THE ITEM.
+	//
+	// The brain decides to loot and the adapter walks the bot to the spot, but nothing
+	// ever took the item: bots arrived, stood on top of a rifle, and left with nothing.
+	// That single gap removes the entire rhythm of a battle royale, because the only
+	// reason to walk anywhere early is to pick something up.
+	//
+	// This calls the fork's own pickup path, the same two functions its capsule-overlap
+	// hook calls for a human player (FortPlayerPawnAthena.cpp:47 and
+	// AFortPlayerPawn::ServerHandlePickupHook). Bots cannot rely on the overlap event
+	// firing: they are moved by kinematic sweeps, not by a ticking CharacterMovement
+	// component, so the engine never raises the overlap for them.
+	//
+	// Returns true if a pickup was actually completed.
+	bool TryTakeLoot(Mind& M, AFortPlayerPawnAthena* Pawn, AFortPlayerControllerAthena* Controller,
+	                 double Now, int* outTookCls)
+	{
+		if (!Pawn || !Controller)
+			return false;
+		const ogfn::LootChoice& Want = M.brain.loot_choice();
+		// Only act on a real decision. A bot that is not looting must not Hoover up
+		// whatever it happens to brush past, or the loot layer stops meaning anything.
+		if (!Want.want || Want.pickup_id == 0)
+			return false;
+
+		auto P = Pawn->GetActorLocation();
+		for (auto& Spot : g_lootSpots)
+		{
+			if (Spot.Id != Want.pickup_id || !Spot.Pickup)
+				continue;
+			// Must actually BE there. Weapon range in metres, pickup reach ~3.5m: a
+			// player has to touch the thing.
+			const float dx = (float)Spot.Pos.X - (float)P.X;
+			const float dy = (float)Spot.Pos.Y - (float)P.Y;
+			const float dz = (float)Spot.Pos.Z - (float)P.Z;
+			if (dx * dx + dy * dy > 350.f * 350.f || std::fabs(dz) > 300.f)
+				return false;
+			if (Spot.Pickup->bDestroyed)
+				return false;
+
+			// One at a time per pickup, and rate-limited: without this a bot re-runs the
+			// animation every tick on the same actor while the engine is still resolving
+			// the fly, which spams the log and can re-add the same item.
+			if (M.lastPickupActor == Spot.Pickup && Now - M.lastPickupAt < 1.0)
+				return false;
+
+			AFortPlayerPawn::ServerHandlePickupHook(Pawn, Spot.Pickup, 0.4f, FVector(), true);
+			const char ok = AFortPickup::CompletePickupAnimationHook(Spot.Pickup);
+			M.lastPickupActor = Spot.Pickup;
+			M.lastPickupAt = Now;
+			// Count ONLY a completed pickup. Counting the attempt made the counter keep
+			// rising even with both hooks stubbed out, so a test could pass while the
+			// bot took nothing, which is the exact bug this replaced.
+			if (ok) ++M.pickupsTaken;
+			if (outTookCls) *outTookCls = (int)Spot.Cls;
+			LOG_INFO(LogBots, "[ogfn] picked up bot#{} cls={} count={} ok={}",
+				(int)(&M - &g_minds[0]), ogfn::to_string(Spot.Cls), Spot.Count, (int)ok);
+			return true;
+		}
+		return false;
 	}
 
 	void ApplyJump(AFortPlayerPawnAthena* Pawn)
@@ -847,6 +927,7 @@ namespace
 				}
 			}
 			Spot.Id = (int)(((uintptr_t)Pickup >> 4) & 0x7fffffff);
+			Spot.Pickup = Pickup;
 			g_lootSpots.push_back(Spot);
 		}
 	}
@@ -943,7 +1024,58 @@ namespace
 		return w;
 	}
 
-	bool TryArm(Mind& M, AFortPlayerControllerAthena* Controller)
+	// Equip the best weapon the bot ALREADY CARRIES. This is what looting feeds: the
+	// brain walks to a gun, the pickup path puts it in the inventory, and this equips it.
+	// Returns false when the bot is genuinely empty-handed.
+	bool EquipBestFromInventory(Mind& M, AFortPlayerControllerAthena* Controller)
+	{
+		auto WorldInventory = Controller->GetWorldInventory();
+		if (!WorldInventory)
+			return false;
+
+		auto& Instances = WorldInventory->GetItemList().GetItemInstances();
+		UFortItem* Best = nullptr;
+		float BestScore = -1.f;
+		for (int k = 0; k < Instances.Num(); ++k)
+		{
+			auto* Item = Instances.At(k);
+			if (!Item || !Item->GetItemEntry())
+				continue;
+			auto* Def = Item->GetItemEntry()->GetItemDefinition();
+			if (!Def)
+				continue;
+			const ogfn::ItemClass Cls = ogfn::classify_item(Def->GetFullName());
+			// Only ranged weapons. A bot holding bandages is not armed.
+			float score = -1.f;
+			switch (Cls)
+			{
+				case ogfn::ItemClass::Sniper: score = 3.f; break;
+				case ogfn::ItemClass::AssaultRifle: score = 2.6f; break;
+				// No Smg case: the brain's classifier folds SMGs into AssaultRifle, so
+				// they are already covered two lines up.
+				case ogfn::ItemClass::Shotgun: score = 2.2f; break;
+				case ogfn::ItemClass::Pistol: score = 1.2f; break;
+				default: continue;
+			}
+			if (score > BestScore) { BestScore = score; Best = Item; }
+		}
+		if (!Best)
+			return false;
+
+		AFortPlayerController::ServerExecuteInventoryItemHook(Controller, Best->GetItemEntry()->GetItemGuid());
+		M.armGuid = Best->GetItemEntry()->GetItemGuid();
+		const std::string Path = Best->GetItemEntry()->GetItemDefinition()->GetPathName();
+		M.armedProfile = ProfileForWeapon(Path);
+		M.motor.set_weapon(M.armedProfile);
+		M.bArmedByLoot = true;
+		M.bArmed = true;
+		LOG_INFO(LogBots, "[ogfn] armed from loot: {}", Path);
+		return true;
+	}
+
+	// Hand a bot a weapon it did not find. ONLY the documented arena fallback calls this
+	// (see kLootGraceSecs); normal arming goes through looting.
+	bool GrantWeapon(Mind& M, AFortPlayerControllerAthena* Controller)
 	{
 		ScanWeaponsOnce();
 		if (g_weaponCands.empty())
@@ -963,19 +1095,13 @@ namespace
 		if (Res.first.empty())
 			return false;
 
-		auto Instance = Res.first.front();
-		AFortPlayerController::ServerExecuteInventoryItemHook(Controller, Instance->GetItemEntry()->GetItemGuid());
-		M.armGuid = Instance->GetItemEntry()->GetItemGuid(); // stored for equip-only rebinds (pawn swaps)
+		return EquipBestFromInventory(M, Controller);
+	}
 
-		// The bot fires the gun it is actually holding: cyclic rate, mag and trigger
-		// shape all come from the weapon it was granted.
-		const std::string armedPath = g_weaponCands[idx]->GetPathName();
-		M.armedProfile = ProfileForWeapon(armedPath);
-		M.motor.set_weapon(M.armedProfile);
-
-		LOG_INFO(LogBots, "[ogfn] armed: {}", armedPath);
-		M.bArmed = true;
-		return true;
+	// Back-compat name used by the harness hooks and the re-equip path.
+	bool TryArm(Mind& M, AFortPlayerControllerAthena* Controller)
+	{
+		return EquipBestFromInventory(M, Controller) || GrantWeapon(M, Controller);
 	}
 
 	// Deployable-ground probe: straight down first, then march toward world origin
@@ -2268,10 +2394,37 @@ void TickAll()
 			AFortPlayerController::ServerExecuteInventoryItemHook(Controller, M.armGuid);
 			LOG_INFO(LogBots, "[ogfn] re-equipped rifle on new pawn (bot#{})", (int)i);
 		}
-		if (!M.bArmed && Now >= M.nextArmTry)
+		// ARMING: land empty-handed, loot a gun, and only then fight.
+		//
+		// Bots used to be handed a rifle during warmup, which deleted the entire early
+		// game: every bot spawned armed with infinite ammo, so there was nothing to
+		// loot, no reason to move except the zone, and no vulnerable phase. A battle
+		// royale where everyone starts with an assault rifle is not a battle royale.
+		//
+		// The gun now comes from the ground via the pickup path. kLootGraceSecs is the
+		// documented FALLBACK: if a bot has been in combat this long and still has no
+		// weapon (bad luck, no loot nearby, arena with no floor spawns), it is handed
+		// one, because a match where bots punch each other is worse than one with a
+		// convenience. Logged so the fallback rate is visible rather than silent.
+		if (!M.bArmed)
 		{
-			if (!TryArm(M, Controller))
-				M.nextArmTry = Now + 2.0;
+			if (M.firstCombatAt < 0.0 && bCombat)
+				M.firstCombatAt = Now;
+			const double inCombatSecs = M.firstCombatAt >= 0.0 ? Now - M.firstCombatAt : 0.0;
+			const bool bGraceOver = inCombatSecs > kLootGraceSecs;
+			if (bGraceOver && Now >= M.nextArmTry)
+			{
+				if (TryArm(M, Controller))
+				{
+					++g_armedByFallback;
+					LOG_INFO(LogBots, "[ogfn] ARENA: no loot found in {:.0f}s, bot#{} handed a weapon",
+						inCombatSecs, (int)i);
+				}
+				else
+				{
+					M.nextArmTry = Now + 2.0;
+				}
+			}
 		}
 
 		if (!bCombat)
@@ -2906,6 +3059,20 @@ void TickAll()
 			M.healItem = 0;
 		}
 
+		// Loot the bot has walked to. Placed BEFORE building and shooting so a bot that
+		// reached a shield takes it instead of standing on it, and so an early-game bot
+		// with no gun has a chance to find one before it picks a fight.
+		{
+			int tookCls = -1;
+			if (TryTakeLoot(M, Pawn, Controller, Now, &tookCls))
+			{
+				// A new weapon is not usable until it is equipped, and the motor's
+				// profile has to match whatever is now in hand.
+				if (!M.bArmed)
+					TryArm(M, Controller);
+			}
+		}
+
 		// Building. decision.build_wall used to be dropped on the floor ("builder.h
 		// is the next pass"), so no bot has ever placed a piece. The builder owns the
 		// sequence, cadence and edits; this only executes the input it returns.
@@ -3027,6 +3194,13 @@ void TestMarkAttacker(size_t i, size_t attackerIdx) {
 }
 void TestClearAttribution() { g_lastAttacker.clear(); }
 int TestBuildNetPushed() { return g_buildNetPushed; }
+int TestArmedByFallback() { return g_armedByFallback; }
+// Loot actually collected, and the loot spots the scan currently sees.
+int TestPickupsTaken(size_t i) {
+	return i < g_minds.size() ? g_minds[i].pickupsTaken : -1;
+}
+int TestLootSpotCount() { return (int)g_lootSpots.size(); }
+int TestPickupCompletions() { return AFortPickup::s_completed; }
 int TestTrackedIds(size_t i) {
 	return i < g_minds.size() ? (int)g_minds[i].brain.perception().targets().size() : -1;
 }
@@ -3059,6 +3233,28 @@ void TestGiveConsumable(size_t i, ogfn::ItemClass cls, int count) {
 	Inv->GetItemList().GetItemInstances().push_back(Item);
 }
 
+
+// Arm the whole fleet immediately. Production arms by LOOTING (a bot lands empty-handed
+// and picks a gun off the floor); a scenario that needs a firefight has to say so
+// explicitly rather than relying on a spawn-time grant that no longer exists.
+void TestGrantWeapons() {
+	for (size_t i = 0; i < g_minds.size() && i < AllPlayerBotsToTick.size(); ++i) {
+		auto* C = Cast<AFortPlayerControllerAthena>(AllPlayerBotsToTick[i].Controller);
+		if (C && !g_minds[i].bArmed)
+			GrantWeapon(g_minds[i], C);
+	}
+}
+
+void TestClearConsumables(size_t i) {
+	// Empties the inventory. TestGiveConsumable(...,0) only ADDS a zero-count entry, so a
+	// scenario that "cleared" the potions still summed to 3 from an earlier one and the
+	// brain kept choosing Heal. Clearing has to actually empty the list.
+	if (i >= g_minds.size()) return;
+	auto* Controller = Cast<AFortPlayerControllerAthena>(AllPlayerBotsToTick[i].Controller);
+	if (!Controller) return;
+	if (auto* Inv = Controller->GetWorldInventory())
+		Inv->GetItemList().GetItemInstances().v.clear();
+}
 
 void TestClearEnemies() {
 	// Harness-only: drop every tracked target so a scenario can test looting, healing or
