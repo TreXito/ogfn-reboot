@@ -92,6 +92,10 @@ namespace
 	// looting is the normal way to arm (2.5 minutes of early game), short enough that a
 	// barren arena never turns into a fistfight.
 	constexpr double kLootGraceSecs = 150.0;
+	// A beat of flight between leaving the bus and touching down, and an absolute
+	// backstop so no pawn can ever be left hanging in the sky.
+	constexpr double kFallAllowance = 1.5;
+	constexpr double kSkySafety = 80.0;
 	int g_armedByFallback = 0;
 	constexpr float kMoveMinDist = 2.5f;      // meters: decision points closer than this are "hold here"
 	constexpr float kTraceEyeOffset = 60.f;    // trace between heads, not feet
@@ -2351,12 +2355,17 @@ void TickAll()
 			{
 				auto P = Pawn->GetActorLocation();
 				const bool bDumpedHigh = P.Z > 20000.f;
-				// Land as soon as it is clear the pawn is not coming down on its own
-				// (no client means no skydive physics: it hangs at the bus transform
-				// forever). This is deliberately NOT gated on the jump schedule: a
-				// staggered jump is about WHEN a bot leaves the bus, and a pawn already
-				// dumped at altitude has already left.
-				if (bDumpedHigh)
+				// Land on THIS BOT'S OWN schedule. Landing everyone on the first tick of
+				// the air phase made the bus ride invisible: fifty pawns appeared at
+				// their spots at once, which is not a drop, it is a cut. Each bot now
+				// stays on the bus until its staggered jump time and only then arrives.
+				//
+				// kFallAllowance is short because a server-only pawn has no skydive to
+				// play out; it is there so a bot that jumps shows a beat of flight rather
+				// than blinking. kSkySafety is an absolute backstop: whatever the clock
+				// does, nobody is left hanging above the map.
+				const bool bOnSchedule = AirElapsed >= M.jumpAtTime + kFallAllowance;
+				if (bDumpedHigh && (bOnSchedule || AirElapsed > kSkySafety))
 				{
 					FVector Col(M.jumpTarget.X, M.jumpTarget.Y, 40000.f);
 					FVector Land(0.f, 0.f, 0.f);
@@ -3293,6 +3302,12 @@ void TestMarkAttacker(size_t i, size_t attackerIdx) {
 void TestClearAttribution() { g_lastAttacker.clear(); }
 int TestBuildNetPushed() { return g_buildNetPushed; }
 int TestArmedByFallback() { return g_armedByFallback; }
+// Make every bot jump NOW. Production staggers drops across the flight; a scenario that
+// is testing the LANDING mechanics (probe, spread, latch) must not also wait out 40s of
+// bus ride.
+void TestForceJumpNow() {
+	for (auto& M : g_minds) { M.jumpAtTime = 0.0; M.bJumped = true; }
+}
 int TestHealsApplied(size_t i) { return i < g_minds.size() ? g_minds[i].healsApplied : -1; }
 // Which weapon class the bot's motor is currently using (its equipped profile).
 int TestEquippedClass(size_t i) {

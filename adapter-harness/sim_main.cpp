@@ -52,7 +52,7 @@ namespace OgfnBot { void TestClearBurstState(size_t i); void TestSetLadder(float
                   int TestPickupsTaken(size_t); int TestLootSpotCount(); int TestPickupCompletions();
                   void TestClearConsumables(size_t); void TestGrantWeapons(); int TestArmedByFallback();
                   int TestIsArmedByLoot(size_t); void TestDisarmBot(size_t);
-                  int TestEquippedClass(size_t); int TestHealsApplied(size_t); void TestAddWeapon(size_t, const char*);
+                  int TestEquippedClass(size_t); int TestHealsApplied(size_t); void TestForceJumpNow(); void TestAddWeapon(size_t, const char*);
                   void TestEquipBest(size_t);
                   int TestLootWant(size_t); float TestLootWorth(size_t); int TestArmedFlag(size_t);
                   const char* TestActionName(size_t); float TestMoveToX(size_t);
@@ -283,6 +283,7 @@ int main()
 	world.GS->Phase = EAthenaGamePhase::SafeZones;
 	for (auto& B : AllPlayerBotsToTick)
 		B.Pawn->Location = FVector(137002.f, -94136.f, 81536.f); // exact live dump coords
+	OgfnBot::TestForceJumpNow();   // the dump already happened; do not wait for a bus ride
 	int teleBefore = P0->teleportCount;
 	TickFor(3.0);
 
