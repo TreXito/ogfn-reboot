@@ -241,10 +241,32 @@ Decision Brain::make_intent(ActionKind a, const WorldSnapshot& w) {
   // erase the live choice one tick after it was made and every consumer would see
   // "no choice" while the bot is visibly walking to the pot.
   switch (a) {
-    case ActionKind::Engage:
-      d.move_to = Vec3(w.circle_center_x, w.circle_center_y, 0.f);
+    case ActionKind::Engage: {
+      // A fight is not a reason to walk to the middle of the map. This used to set
+      // move_to to the CIRCLE CENTRE, so an engaging bot drifted toward the zone centre
+      // while shooting: every bot in every fight pulled toward the same point, which is
+      // how a 50-bot fleet ends up in a 27 metre box with everyone dead in one second.
+      //
+      // A player either holds their ground with cover and strafe, or closes to a
+      // sensible fighting distance. So: keep the standoff, and only advance when the
+      // target is further than that.
+      const float standoff = lerpf(18.f, 9.f, persona_.aggression);
+      const float gx = w.target_pos.x - w.self_pos.x;
+      const float gy = w.target_pos.y - w.self_pos.y;
+      const float glen = std::sqrt(gx * gx + gy * gy);
+      if (glen > standoff + 1.f && glen > 1e-3f)
+      {
+        const float advance = glen - standoff;
+        d.move_to = Vec3(w.self_pos.x + (gx / glen) * advance,
+                         w.self_pos.y + (gy / glen) * advance, 0.f);
+      }
+      else
+      {
+        d.move_to = w.self_pos;   // close enough: hold and fight
+      }
       d.fire = true;
       break;
+    }
     case ActionKind::Build:
       d.build_wall = true;
       d.fire = true;

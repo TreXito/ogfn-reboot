@@ -1484,6 +1484,7 @@ namespace
 			W.target_has_line_of_sight = Target->visible;
 			ogfn::Vec3 D = Target->last_seen_pos - W.self_pos;
 			W.target_distance = ogfn::length(D);
+			W.target_pos = Target->last_seen_pos;
 			W.target_health = Target->health;
 			W.target_is_reloading = false; // engine exposes no reload state for others
 		}

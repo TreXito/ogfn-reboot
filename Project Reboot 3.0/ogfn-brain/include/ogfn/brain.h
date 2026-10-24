@@ -52,6 +52,10 @@ struct WorldSnapshot {
   // wall is not an engagement, it is noise.
   bool target_has_line_of_sight = true;
   float target_distance = 0.f;
+  // WHERE the target is, not just how far. Engage needs a direction: advancing toward a
+  // fight and backing off from one are different moves, and "walk to the circle centre
+  // instead" is how every bot in every fight converged on the same point.
+  Vec3 target_pos{};
   float target_health = 100.f;
   bool target_is_reloading = true;
 
@@ -193,6 +197,12 @@ class Brain {
   // does not advance. 90 ticks is ~1.5s at 60Hz, which is longer than any real beat but
   // short enough that a frozen bot recovers inside one fight.
   static constexpr int kMaxCommittedTicks = 90;
+
+  // Test/tuning hook: the Decision a given action WOULD produce right now, without
+  // running the argmax. The argmax depends on persona bias and per-plan jitter, so a
+  // test that wants to pin "what does Engage actually do" cannot get there through
+  // think() deterministically. Not called from any gameplay path.
+  Decision intent_for(ActionKind a, const WorldSnapshot& w) { return make_intent(a, w); }
 
   void prime_action(ActionKind a, double now) {
     last_action_ = a;
