@@ -85,14 +85,25 @@ float Brain::score(ActionKind k, const WorldSnapshot& w) const {
       return 0.05f;
 
     case ActionKind::Loot: {
-      // The score must agree with the valuation, or the brain picks Loot on a
-      // COUNT and then make_intent finds nothing worth the walk and sends the bot
-      // to the circle instead: "decided to loot" with no looting in it.
-      if (w.loot_within_30m <= 0) return 0.f;
+      // The score must agree with the valuation, or the brain picks Loot on a COUNT
+      // and then make_intent finds nothing worth the walk: "decided to loot" with no
+      // looting in it. `c.want` IS that check, and it already applies the per-item
+      // radius and the walk cost.
+      //
+      // There used to be an extra `loot_within_30m <= 0` gate on top, which was
+      // redundant AND wrong: it hard-vetoed every item past 30m, so the wider radius
+      // that lets an unarmed bot cross ground for a gun could never take effect, and
+      // a bot that landed in the open scored Loot at exactly zero and stood there.
       const LootChoice c = loot_.choose(w.loot, w.inventory, w.self_pos,
                                         w.circle_shrink_in_secs, engaged);
       if (!c.want) return 0.f;
       float s = 0.30f * (0.4f + p.greed) * clampf(c.worth * 2.2f, 0.f, 1.f);
+      // A player with no weapon is not "considering" loot, they are GOING to get one.
+      // A modest multiplier was not enough: the per-persona bias and the per-plan
+      // jitter can outvote a bot into Idle, and an unarmed bot that idles is the exact
+      // "bots stand there doing nothing" look. Being unarmed is not a preference, it is
+      // the one thing that has to be fixed before anything else matters.
+      if (w.inventory.weapon_tier <= 0) s *= 3.2f;
       s *= 1.f - clampf(zp * 0.9f, 0.f, 0.95f);
       s *= 1.f - clampf((1.f - hp) * 0.5f, 0.f, 0.5f);
       // Looting while someone is shooting at you is a good way to die, but a flat

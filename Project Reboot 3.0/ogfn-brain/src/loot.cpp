@@ -137,7 +137,17 @@ float LootValuer::worth_of(const LootSample& s, const Inventory& inv, float dist
 
   // Distance cost. Humans will not walk 40m in the open for a bandage: the cost
   // curve is steep, not linear, and that is what stops bots vacuuming the map.
-  const float walk_cost = 1.f + (dist / 18.f) * (dist / 18.f);
+  //
+  // EXCEPT when the item is the thing you cannot play without. An unarmed player
+  // crosses a building, a field, whatever it takes, to reach a gun; the same player
+  // will not walk 40m for a bandage. One flat curve for both is why an unarmed bot
+  // would sit in the open and never arm itself: at 40m the curve charges ~6x, so a
+  // rifle scored the same as a bandage two steps away.
+  const bool is_weapon = (s.cls == ItemClass::AssaultRifle || s.cls == ItemClass::Shotgun ||
+                          s.cls == ItemClass::Sniper || s.cls == ItemClass::Pistol);
+  const bool desperate = inv.weapon_tier <= 0 && is_weapon;
+  const float scale = desperate ? 90.f : 18.f;   // a much gentler falloff when unarmed
+  const float walk_cost = 1.f + (dist / scale) * (dist / scale);
   float worth = base / walk_cost;
 
   // Clock. Loot only competes while there is time; once the circle is closing the
@@ -168,8 +178,14 @@ LootChoice LootValuer::choose(const std::vector<LootSample>& samples, const Inve
   LootChoice best;
   for (const auto& s : samples) {
     const float dist = length(s.pos - self);
-    // Anything past this radius is a rotation decision, not a loot decision.
-    if (dist > 45.f) continue;
+    // Anything past this radius is a rotation decision, not a loot decision. The one
+    // exception is a weapon when you have none: an unarmed player will run a long way
+    // to the nearest gun, and a bot that only ever looks 45m ahead stays unarmed for
+    // the whole match while slowly rotating to the zone.
+    const bool is_weapon = (s.cls == ItemClass::AssaultRifle || s.cls == ItemClass::Shotgun ||
+                            s.cls == ItemClass::Sniper || s.cls == ItemClass::Pistol);
+    const float radius = (inv.weapon_tier <= 0 && is_weapon) ? 150.f : 45.f;
+    if (dist > radius) continue;
     const float w = worth_of(s, inv, dist, circle_closing_secs, engaged);
     if (w > best.worth) {
       best.worth = w;

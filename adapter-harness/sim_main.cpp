@@ -52,6 +52,9 @@ namespace OgfnBot { void TestClearBurstState(size_t i); void TestSetLadder(float
                   int TestPickupsTaken(size_t); int TestLootSpotCount(); int TestPickupCompletions();
                   void TestClearConsumables(size_t); void TestGrantWeapons(); int TestArmedByFallback();
                   int TestIsArmedByLoot(size_t); void TestDisarmBot(size_t);
+                  int TestLootWant(size_t); float TestLootWorth(size_t); int TestArmedFlag(size_t);
+                  const char* TestActionName(size_t); float TestMoveToX(size_t);
+                  int TestLootSamplesSeen(size_t); int TestWeaponTierSeen(size_t);
                   void TestClearAttribution(); } // adapter (OGFN_HARNESS)
 
 static int g_failures = 0;
@@ -979,9 +982,11 @@ int main()
 		OgfnBot::TestDisarmBot(0);
 		EXPECT(OgfnBot::TestIsArmedByLoot(0) == 0, "bot0 starts unarmed");
 
-		// An assault rifle on the floor, 3 m away, with its REAL asset name.
+		// An assault rifle 90m away: outside the normal loot radius, inside an unarmed
+		// bot's attention. This is what stops a bot that lands in open field from
+		// standing around unarmed for the whole match.
 		auto* Gun = new AFortPickup();
-		Gun->Location = FVector(90000.f + 300.f, 45000.f, 100.f);
+		Gun->Location = FVector(90000.f + 9000.f, 45000.f, 100.f);   // 90 m, in uu
 		auto* WDef = new UFortWorldItemDefinition();
 		WDef->name = "WID_Assault_Auto_Athena_C";
 		auto* WEnt = new FFortItemEntry();
@@ -989,18 +994,25 @@ int main()
 		WEnt->Count = 1;
 		Gun->Entry = WEnt;
 		{
+			// REPLACE the pickup set, do not append: earlier scenarios left their own
+			// pickups registered, and the bot walked toward one of those instead of the
+			// gun this scenario is about.
 			auto* PC3 = Harness::g_namedClasses[L"/Script/FortniteGame.FortPickup"];
-			if (PC3) Harness::g_classObjects[PC3].push_back(Gun);
+			if (PC3) Harness::g_classObjects[PC3] = { Gun };
 		}
 		OgfnBot::TestForceLoot();
 
+		TickFor(0.5);
 		const int fallbackBefore = OgfnBot::TestArmedByFallback();
-		for (int k = 0; k < 30 * 10 && OgfnBot::TestIsArmedByLoot(0) == 0; ++k)
+		const float startX = P0->Location.X;
+		// 90 m at ~6 m/s is ~15s of walking, so allow 30s.
+		for (int k = 0; k < 30 * 30 && OgfnBot::TestIsArmedByLoot(0) == 0; ++k)
 			TickFor(1.0 / 30.0);
 		const int byLoot = OgfnBot::TestIsArmedByLoot(0);
 		const int fallbacks = OgfnBot::TestArmedByFallback() - fallbackBefore;
-		std::printf("  [P21] armedByLoot=%d fallbacksUsed=%d\n", byLoot, fallbacks);
-		EXPECT(byLoot == 1, "an unarmed bot walks to a rifle and arms itself with it");
+		std::printf("  [P21] armedByLoot=%d fallbacksUsed=%d movedX=%.0f -> x=%.0f\n",
+			byLoot, fallbacks, startX, P0->Location.X);
+		EXPECT(byLoot == 1, "an unarmed bot crosses 90m to a rifle and arms itself");
 		EXPECT(fallbacks == 0, "and it did NOT need the arena fallback (looting works)");
 	}
 

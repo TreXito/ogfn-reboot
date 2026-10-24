@@ -1282,9 +1282,13 @@ namespace
 			const float d2 = dx * dx + dy * dy;
 			if (d2 <= 30.f * 30.f)
 				loot30++;
-			// The valuator has its own, wider radius (45m); feed it everything within
-			// reach rather than pre-filtering at 30m, or a pot at 32m is invisible.
-			if (d2 <= 46.f * 46.f)
+			// The valuator has its own radius: 45m normally, but 150m for a weapon when
+			// the bot has none, because an unarmed player crosses ground for a gun. The
+			// feed has to be at least as wide as the valuator's reach or that rule can
+			// never fire: a bot would be told about nothing beyond 46m and would stay
+			// unarmed while slowly rotating to the zone.
+			const float feedRadius = M.bArmed ? 46.f : 150.f;
+			if (d2 <= feedRadius * feedRadius)
 			{
 				ogfn::LootSample Sample;
 				Sample.id = Spot.Id;
@@ -2832,9 +2836,16 @@ void TickAll()
 		// tick steps the pawn: ground-follow probe from just above head height
 		// (climbs slopes and low obstacles, misses tall walls so the sweep stops
 		// us), then a bSweep=true teleport the engine resolves against geometry.
+		// LOOT BELONGS HERE. A bot that decided "Loot" set a destination and then never
+		// moved toward it: the brain planned the walk, the movement layer ignored it, and
+		// the only reason any pickup ever worked is that the item happened to be within
+		// arm's reach already. Walking to loot is the single most common thing a player
+		// does in the first two minutes, so leaving it out compresses the whole early
+		// game into standing still.
 		if (M.decision.action == ogfn::ActionKind::RotateToCircle
 			|| M.decision.action == ogfn::ActionKind::Engage
-			|| M.decision.action == ogfn::ActionKind::Flee)
+			|| M.decision.action == ogfn::ActionKind::Flee
+			|| M.decision.action == ogfn::ActionKind::Loot)
 		{
 			// While engaged the heading comes from the movement layer, not from
 			// move_to: a bot that walks straight at the circle while shooting is
@@ -3207,6 +3218,12 @@ void TestDisarmBot(size_t i) {
 	g_minds[i].bArmed = false;
 	g_minds[i].bArmedByLoot = false;
 	g_minds[i].armGuid = FGuid();
+	// ALSO empty the inventory. Clearing only the flag left the gun in the bag, so the
+	// snapshot still reported weapon_tier 2 and the brain correctly believed it was
+	// armed: the scenario then measured a bot that had no reason to go looting.
+	if (auto* C = Cast<AFortPlayerControllerAthena>(AllPlayerBotsToTick[i].Controller))
+		if (auto* Inv = C->GetWorldInventory())
+			Inv->GetItemList().GetItemInstances().v.clear();
 }
 // Loot actually collected, and the loot spots the scan currently sees.
 int TestPickupsTaken(size_t i) {
