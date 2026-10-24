@@ -200,8 +200,12 @@ struct AFortPawn : AActor {};
 struct AFortPickup;
 // Real FortPlayerPawn.h:31 (AFortPlayerPawn : AFortPawn) and :52. The pickup RPC lives
 // here, not on the pickup, because it is the PAWN that takes the item.
+struct AFortPlayerController;
 struct AFortPlayerPawn : AFortPawn
 {
+	// Real AFortPawn::GetController(). Needed so a completed pickup can put the item in
+	// the OWNER's inventory the way the client does.
+	AFortPlayerController* Controller = nullptr;
 	static inline int s_handleCalls = 0;
 	static void ServerHandlePickupHook(AFortPlayerPawn* Pawn, AFortPickup* Pickup,
 	                                   float InFlyTime, FVector InStartDirection,

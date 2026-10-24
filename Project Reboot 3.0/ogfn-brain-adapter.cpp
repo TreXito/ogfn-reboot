@@ -3080,10 +3080,13 @@ void TickAll()
 			int tookCls = -1;
 			if (TryTakeLoot(M, Pawn, Controller, Now, &tookCls))
 			{
-				// A new weapon is not usable until it is equipped, and the motor's
-				// profile has to match whatever is now in hand.
-				if (!M.bArmed)
-					TryArm(M, Controller);
+				// Re-evaluate what is in hand after EVERY pickup, not only when unarmed.
+				// A bot that looted a pistol early and then found an assault rifle stayed
+				// on the pistol for the rest of the match, because arming ran once. Real
+				// players trade up the moment something better is on the floor.
+				// EquipBestFromInventory is a strict ordering, so this is stable: it only
+				// switches when the new gun is genuinely better.
+				EquipBestFromInventory(M, Controller);
 			}
 		}
 
@@ -3209,6 +3212,30 @@ void TestMarkAttacker(size_t i, size_t attackerIdx) {
 void TestClearAttribution() { g_lastAttacker.clear(); }
 int TestBuildNetPushed() { return g_buildNetPushed; }
 int TestArmedByFallback() { return g_armedByFallback; }
+// Which weapon class the bot's motor is currently using (its equipped profile).
+int TestEquippedClass(size_t i) {
+	return i < g_minds.size() ? (int)g_minds[i].armedProfile.cls : -1;
+}
+// Put a weapon directly in a bot's bag, as if it had looted it.
+void TestAddWeapon(size_t i, const char* path) {
+	if (i >= AllPlayerBotsToTick.size()) return;
+	auto* C = Cast<AFortPlayerControllerAthena>(AllPlayerBotsToTick[i].Controller);
+	if (!C) return;
+	auto* Inv = C->GetWorldInventory();
+	if (!Inv) return;
+	auto* Def = new UFortWorldItemDefinition();
+	Def->name = path;
+	auto* Item = new UFortItem();
+	Item->name = "BaggedWeapon";
+	Item->Entry.Definition = Def;
+	Item->Entry.Count = 1;
+	Inv->GetItemList().GetItemInstances().push_back(Item);
+}
+void TestEquipBest(size_t i) {
+	if (i >= g_minds.size() || i >= AllPlayerBotsToTick.size()) return;
+	auto* C = Cast<AFortPlayerControllerAthena>(AllPlayerBotsToTick[i].Controller);
+	if (C) EquipBestFromInventory(g_minds[i], C);
+}
 int TestIsArmedByLoot(size_t i) {
 	return i < g_minds.size() ? (g_minds[i].bArmed && g_minds[i].bArmedByLoot ? 1 : 0) : -1;
 }

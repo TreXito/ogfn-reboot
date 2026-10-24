@@ -52,6 +52,8 @@ namespace OgfnBot { void TestClearBurstState(size_t i); void TestSetLadder(float
                   int TestPickupsTaken(size_t); int TestLootSpotCount(); int TestPickupCompletions();
                   void TestClearConsumables(size_t); void TestGrantWeapons(); int TestArmedByFallback();
                   int TestIsArmedByLoot(size_t); void TestDisarmBot(size_t);
+                  int TestEquippedClass(size_t); void TestAddWeapon(size_t, const char*);
+                  void TestEquipBest(size_t);
                   int TestLootWant(size_t); float TestLootWorth(size_t); int TestArmedFlag(size_t);
                   const char* TestActionName(size_t); float TestMoveToX(size_t);
                   int TestLootSamplesSeen(size_t); int TestWeaponTierSeen(size_t);
@@ -173,6 +175,7 @@ int main()
 		auto PC = new AFortPlayerControllerAthena();
 		PC->Inventory = new AFortInventory();
 		PC->MyPawn = Pawn;
+		Pawn->Controller = PC;   // so a completed pickup can fill this bot's inventory
 
 		PlayerBot Bot;
 		Bot.Pawn = Pawn;
@@ -1014,6 +1017,39 @@ int main()
 			byLoot, fallbacks, startX, P0->Location.X);
 		EXPECT(byLoot == 1, "an unarmed bot crosses 90m to a rifle and arms itself");
 		EXPECT(fallbacks == 0, "and it did NOT need the arena fallback (looting works)");
+	}
+
+	// ---------- P22: bots TRADE UP to a better gun ----------
+	// Arming used to run once. A bot that found a pistol early stayed on the pistol for
+	// the rest of the match even after looting an assault rifle, because nothing
+	// re-evaluated what was in hand after a pickup.
+	std::printf("\n-- P22: a bot upgrades to the better weapon it loots --\n");
+	{
+		// Shotgun -> rifle. These two classify to DIFFERENT WeaponClass values, so the
+		// test can actually tell whether the switch happened; a pistol and a rifle both
+		// collapse to Rifle, which made an earlier version of this pass while proving
+		// nothing.
+		OgfnBot::TestClearConsumables(0);       // empty bag
+		OgfnBot::TestAddWeapon(0, "WID_Shotgun_Standard_Athena_C");
+		OgfnBot::TestEquipBest(0);
+		const int first = OgfnBot::TestEquippedClass(0);
+		std::printf("  [P22] after shotgun: class=%d\n", first);
+		EXPECT(first == (int)WeaponClass::Shotgun, "the only gun in the bag is equipped");
+
+		// Now the rifle arrives, exactly as a pickup would deliver it.
+		OgfnBot::TestAddWeapon(0, "WID_Assault_Auto_Athena_C");
+		OgfnBot::TestEquipBest(0);
+		const int upgraded = OgfnBot::TestEquippedClass(0);
+		std::printf("  [P22] after rifle: class=%d\n", upgraded);
+		EXPECT(upgraded == (int)WeaponClass::Rifle,
+		       "and looting a rifle switches the bot onto the rifle");
+		EXPECT(upgraded != first, "the weapon class actually changed");
+
+		// Upgrading must be stable: equipping again when nothing changed keeps the rifle,
+		// or the bot would flicker between two guns.
+		OgfnBot::TestEquipBest(0);
+		EXPECT(OgfnBot::TestEquippedClass(0) == upgraded,
+		       "re-equipping with no change does not flicker back");
 	}
 
 	// ---------- summary ----------
