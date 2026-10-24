@@ -53,7 +53,7 @@ namespace OgfnBot { void TestClearBurstState(size_t i); void TestSetLadder(float
                   void TestClearConsumables(size_t); void TestGrantWeapons(); int TestArmedByFallback();
                   int TestIsArmedByLoot(size_t); void TestDisarmBot(size_t);
                   int TestEquippedClass(size_t); int TestHealsApplied(size_t); void TestForceJumpNow(); void TestAddWeapon(size_t, const char*);
-                  void TestEquipBest(size_t);
+                  void TestEquipBest(size_t); int TestBuildClassMask();
                   int TestLootWant(size_t); float TestLootWorth(size_t); int TestArmedFlag(size_t);
                   const char* TestActionName(size_t); float TestMoveToX(size_t);
                   int TestLootSamplesSeen(size_t); int TestWeaponTierSeen(size_t);
@@ -457,16 +457,31 @@ int main()
 		}
 		placed = OgfnBot::TestBuildLog();
 		std::printf("  [P10] build inputs reaching the world: %d\n", (int)placed.size());
-		int walls = 0, floors = 0, edits = 0;
+		int walls = 0, floors = 0, ramps = 0, cones = 0, edits = 0;
 		for (auto& e : placed)
 		{
 			if (e.first == (int)PieceKind::Wall) ++walls;
 			if (e.first == (int)PieceKind::Floor) ++floors;
+			if (e.first == (int)PieceKind::Ramp) ++ramps;
+			if (e.first == (int)PieceKind::Cone) ++cones;
 			if (e.second) ++edits;
 		}
 		EXPECT(!placed.empty(), "a bot under fire places pieces (build_wall is wired)");
 		EXPECT(walls > 0, "and the pieces are walls, not something arbitrary");
 		EXPECT(floors > 0, "the box gets a roof");
+		// Live log once read "no buildable class for piece Ramp, bots cannot build" and
+		// the bot retried 28 times, because only the wall asset path was right on this
+		// build. Every piece kind the builder can emit must resolve to a real class.
+		std::printf("  [P10] piece mix walls=%d floors=%d ramps=%d cones=%d\n",
+			walls, floors, ramps, cones);
+		// Resolve every piece kind directly. A scenario cannot rely on the builder
+		// emitting each one (a box-up is walls + floor), so ask the table itself.
+		const int mask = OgfnBot::TestBuildClassMask();
+		std::printf("  [P10] build class mask=0x%x (want 0xf)\n", mask);
+		EXPECT((mask & 1) != 0, "wall resolves to a real build class");
+		EXPECT((mask & 2) != 0, "floor resolves to a real build class");
+		EXPECT((mask & 4) != 0, "ramp resolves (live bug: 'no buildable class for Ramp')");
+		EXPECT((mask & 8) != 0, "cone resolves to a real build class");
 		// REPLICATION. A piece that only exists on the server is invisible to the player,
 		// which is the live report "the builds were not matched with server". Every piece
 		// the builder placed must have been flushed out of dormancy and forced to update.

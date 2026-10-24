@@ -430,11 +430,15 @@ namespace
 	//
 	// Returns true if a piece was spawned. Logged misses are one-shot per class so a
 	// bot that cannot build does not spam the log 50 times a second.
-	bool ApplyBuildPiece(AFortPlayerControllerAthena* Controller, AFortPlayerPawnAthena* Pawn,
-	                     const ogfn::BuildInput& In, const ogfn::BuildGrid& Grid) {
-		if (!Controller || !Pawn || In.piece == ogfn::PieceKind::None)
-			return false;
-
+	// Which class would this piece kind spawn?
+	//
+	// Resolution is DISCOVERED, not hardcoded: a live run logged
+	// `wall=2327271170560 floor=0 ramp=0 cone=0` and then "no buildable class for piece
+	// Ramp, bots cannot build" (retried 28 times), because only the wall asset path was
+	// correct on this build. Split out of ApplyBuildPiece so resolution can be tested
+	// directly, instead of a scenario having to coax the builder into emitting each kind.
+	UClass* ResolvesBuildClass(ogfn::PieceKind Kind)
+	{
 		static bool s_resolved = false;
 		static UClass* s_wall = nullptr;
 		static UClass* s_floor = nullptr;
@@ -486,14 +490,22 @@ namespace
 				(__int64)s_wall, (__int64)s_floor, (__int64)s_ramp, (__int64)s_cone);
 		}
 
-		UClass* Class = nullptr;
-		switch (In.piece) {
-			case ogfn::PieceKind::Wall: Class = s_wall; break;
-			case ogfn::PieceKind::Floor: Class = s_floor; break;
-			case ogfn::PieceKind::Ramp: Class = s_ramp; break;
-			case ogfn::PieceKind::Cone: Class = s_cone; break;
-			case ogfn::PieceKind::None: return false;
+		switch (Kind) {
+			case ogfn::PieceKind::Wall: return s_wall;
+			case ogfn::PieceKind::Floor: return s_floor;
+			case ogfn::PieceKind::Ramp: return s_ramp;
+			case ogfn::PieceKind::Cone: return s_cone;
+			case ogfn::PieceKind::None: return nullptr;
 		}
+		return nullptr;
+	}
+
+	bool ApplyBuildPiece(AFortPlayerControllerAthena* Controller, AFortPlayerPawnAthena* Pawn,
+	                     const ogfn::BuildInput& In, const ogfn::BuildGrid& Grid) {
+		if (!Controller || !Pawn || In.piece == ogfn::PieceKind::None)
+			return false;
+
+		UClass* Class = ResolvesBuildClass(In.piece);
 		if (!Class) {
 #ifdef OGFN_HARNESS
 			// The harness has no asset registry, so no class can resolve. The point of
@@ -3302,6 +3314,17 @@ void TestMarkAttacker(size_t i, size_t attackerIdx) {
 void TestClearAttribution() { g_lastAttacker.clear(); }
 int TestBuildNetPushed() { return g_buildNetPushed; }
 int TestArmedByFallback() { return g_armedByFallback; }
+// Bitmask of piece kinds that resolve to a real class: 1=wall 2=floor 4=ramp 8=cone.
+// Live evidence for why this exists: "no buildable class for piece Ramp, bots cannot
+// build", retried 28 times, because only the wall asset path was right on this build.
+int TestBuildClassMask() {
+	int mask = 0;
+	const ogfn::PieceKind kinds[4] = { ogfn::PieceKind::Wall, ogfn::PieceKind::Floor,
+	                                   ogfn::PieceKind::Ramp, ogfn::PieceKind::Cone };
+	for (int k = 0; k < 4; ++k)
+		if (ResolvesBuildClass(kinds[k])) mask |= (1 << k);
+	return mask;
+}
 // Make every bot jump NOW. Production staggers drops across the flight; a scenario that
 // is testing the LANDING mechanics (probe, spread, latch) must not also wait out 40s of
 // bus ride.
