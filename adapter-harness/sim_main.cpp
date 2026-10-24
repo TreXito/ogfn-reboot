@@ -51,6 +51,7 @@ namespace OgfnBot { void TestClearBurstState(size_t i); void TestSetLadder(float
                   int TestTrackedIds(size_t); int TestBuildNetPushed(); void TestMarkAttacker(size_t, size_t);
                   int TestPickupsTaken(size_t); int TestLootSpotCount(); int TestPickupCompletions();
                   void TestClearConsumables(size_t); void TestGrantWeapons(); int TestArmedByFallback();
+                  int TestIsArmedByLoot(size_t); void TestDisarmBot(size_t);
                   void TestClearAttribution(); } // adapter (OGFN_HARNESS)
 
 static int g_failures = 0;
@@ -951,6 +952,56 @@ int main()
 			taken, done, (int)Loot->bDestroyed);
 		EXPECT(taken > 0, "the bot that walks to loot actually takes it");
 		EXPECT(done > 0, "and the pickup completes (the item leaves the world)");
+	}
+
+	// ---------- P21: land empty-handed, find a gun, fight ----------
+	// Bots no longer spawn with a rifle: they land unarmed and arm themselves from the
+	// floor. That is the entire early game, and it is also the riskiest change here,
+	// because a bot that never finds a gun just stands around. Prove the loop.
+	std::printf("\n-- P21: an unarmed bot arms itself from loot --\n");
+	{
+		world.ND->Connections.v.clear();
+		EnemyPawn->bDestroyed = true;
+		Harness::g_wallUp = false;
+		OgfnBot::TestSetLadder(90000.f, 45000.f, 30000.f);
+		P0->Location = FVector(90000.f, 45000.f, 100.f);
+		P0->Health = 100.f; P0->Shield = 100.f;   // no healing temptation
+		P0->Rotation.Yaw = 0.f;
+		P0->lastRotation.Yaw = 0.f;
+		for (size_t bi = 1; bi < AllPlayerBotsToTick.size(); ++bi)
+		{
+			AllPlayerBotsToTick[bi].Pawn->bDestroyed = true;
+			AllPlayerBotsToTick[bi].Pawn->Location =
+				FVector(90000.f + (float)bi * 500000.f, 45000.f, 100.f);
+		}
+		OgfnBot::TestClearEnemies();
+		OgfnBot::TestClearConsumables(0);
+		OgfnBot::TestDisarmBot(0);
+		EXPECT(OgfnBot::TestIsArmedByLoot(0) == 0, "bot0 starts unarmed");
+
+		// An assault rifle on the floor, 3 m away, with its REAL asset name.
+		auto* Gun = new AFortPickup();
+		Gun->Location = FVector(90000.f + 300.f, 45000.f, 100.f);
+		auto* WDef = new UFortWorldItemDefinition();
+		WDef->name = "WID_Assault_Auto_Athena_C";
+		auto* WEnt = new FFortItemEntry();
+		WEnt->Definition = WDef;
+		WEnt->Count = 1;
+		Gun->Entry = WEnt;
+		{
+			auto* PC3 = Harness::g_namedClasses[L"/Script/FortniteGame.FortPickup"];
+			if (PC3) Harness::g_classObjects[PC3].push_back(Gun);
+		}
+		OgfnBot::TestForceLoot();
+
+		const int fallbackBefore = OgfnBot::TestArmedByFallback();
+		for (int k = 0; k < 30 * 10 && OgfnBot::TestIsArmedByLoot(0) == 0; ++k)
+			TickFor(1.0 / 30.0);
+		const int byLoot = OgfnBot::TestIsArmedByLoot(0);
+		const int fallbacks = OgfnBot::TestArmedByFallback() - fallbackBefore;
+		std::printf("  [P21] armedByLoot=%d fallbacksUsed=%d\n", byLoot, fallbacks);
+		EXPECT(byLoot == 1, "an unarmed bot walks to a rifle and arms itself with it");
+		EXPECT(fallbacks == 0, "and it did NOT need the arena fallback (looting works)");
 	}
 
 	// ---------- summary ----------

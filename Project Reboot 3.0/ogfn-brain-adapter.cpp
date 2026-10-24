@@ -1340,9 +1340,12 @@ namespace
 					default: break;
 				}
 			}
-			// A bot holding any of the granted weapons counts as armed.
-			if (W.inventory.weapon_tier == 0)
-				W.inventory.weapon_tier = 2;
+			// NO free "counts as armed". This used to force weapon_tier to 2 for every
+			// bot unconditionally, which was true back when the adapter handed everyone a
+			// rifle at spawn. Now bots land empty-handed, so that line made an unarmed bot
+			// believe it already carried a good gun: it never valued a rifle on the floor
+			// and never armed itself. weapon_tier is reported honestly from the inventory
+			// scan above, which already sets it when a real gun is present.
 		}
 		W.enemies_within_30m = enemiesSeenWithin30;
 		W.enemies_currently_fighting_each_other = 0; // needs damage observation, next pass
@@ -3195,6 +3198,16 @@ void TestMarkAttacker(size_t i, size_t attackerIdx) {
 void TestClearAttribution() { g_lastAttacker.clear(); }
 int TestBuildNetPushed() { return g_buildNetPushed; }
 int TestArmedByFallback() { return g_armedByFallback; }
+int TestIsArmedByLoot(size_t i) {
+	return i < g_minds.size() ? (g_minds[i].bArmed && g_minds[i].bArmedByLoot ? 1 : 0) : -1;
+}
+// Take a bot's weapon away, so a scenario can test the landing-empty-handed loop.
+void TestDisarmBot(size_t i) {
+	if (i >= g_minds.size()) return;
+	g_minds[i].bArmed = false;
+	g_minds[i].bArmedByLoot = false;
+	g_minds[i].armGuid = FGuid();
+}
 // Loot actually collected, and the loot spots the scan currently sees.
 int TestPickupsTaken(size_t i) {
 	return i < g_minds.size() ? g_minds[i].pickupsTaken : -1;
