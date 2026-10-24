@@ -163,6 +163,8 @@ namespace
 		// reports the remaining time back through the snapshot so the brain keeps the
 		// bot in the animation instead of re-deciding every tick.
 		float healRemaining = 0.f;
+		// Consumables whose EFFECT has actually landed (not merely equipped).
+		int   healsApplied = 0;
 		int healItem = 0;
 		bool healEquipped = false;
 		int healsUsed = 0;
@@ -548,6 +550,77 @@ namespace
 		// harness and a regression there would have shipped silently.
 		if (g_buildRecorder)
 			g_buildRecorder(In.piece, In.yaw_deg, In.edit);
+		return true;
+	}
+
+	// Apply the effect of a consumable that just finished.
+	//
+	// The client has no use-item path (nothing in the fork calls ServerUseItem or any
+	// consumable ability), so a bot could equip a potion, run the countdown and gain
+	// nothing. That is worse than not healing: a bot that spends three seconds drinking
+	// and stays on 20 hp loses every fight after its first, and a player watching sees
+	// shields go up on the HUD that never rise.
+	//
+	// So the adapter resolves the restore itself with the same setters it uses for
+	// damage. Amounts are the real S3 values.
+	bool ApplyConsumable(Mind& M, AFortPlayerPawnAthena* Pawn, AFortPlayerControllerAthena* Controller)
+	{
+		if (!Pawn || !Controller)
+			return false;
+		float shieldGain = 0.f, healthGain = 0.f;
+		switch (M.healItem)
+		{
+			case 1: shieldGain = 25.f; break;                       // small shield
+			case 2: shieldGain = 50.f; break;                       // big pot
+			case 3: healthGain = 100.f; break;                      // medkit
+			case 4: healthGain = 15.f; break;                       // bandage
+			default: return false;
+		}
+
+		// Bandages stop at 75 hp, exactly like the game.
+		const float curHp = Pawn->GetHealth();
+		const float curSh = Pawn->GetShield();
+		float newHp = curHp, newSh = curSh;
+		if (shieldGain > 0.f) newSh = (std::min)(100.f, curSh + shieldGain);
+		if (healthGain > 0.f)
+		{
+			const float cap = (M.healItem == 4) ? 75.f : 100.f;
+			newHp = (std::min)(cap, curHp + healthGain);
+		}
+		if (newHp == curHp && newSh == curSh)
+			return false;   // already full: do not waste the item
+
+		Pawn->SetHealth(newHp);
+		Pawn->SetShield(newSh);
+		M.healsApplied++;
+
+		// CONSUME it. Consumables are finite; leaving the count alone would let a bot
+		// heal forever from one pot.
+		if (auto* Inv = Controller->GetWorldInventory())
+		{
+			auto& Instances = Inv->GetItemList().GetItemInstances();
+			for (int ii = 0; ii < Instances.Num(); ++ii)
+			{
+				auto* Item = Instances.At(ii);
+				if (!Item || !Item->GetItemEntry()) continue;
+				auto* Def = Item->GetItemEntry()->GetItemDefinition();
+				if (!Def) continue;
+				const ogfn::ItemClass Cls = ogfn::classify_item(Def->GetFullName());
+				const bool match =
+					(M.healItem == 1 && Cls == ogfn::ItemClass::ShieldPotion) ||
+					(M.healItem == 2 && Cls == ogfn::ItemClass::ShieldBig) ||
+					(M.healItem == 3 && Cls == ogfn::ItemClass::Medkit) ||
+					(M.healItem == 4 && Cls == ogfn::ItemClass::Bandage);
+				if (!match) continue;
+				auto* Entry = Item->GetItemEntry();
+				--Entry->Count;
+				if (Entry->Count <= 0) Instances.v.erase(Instances.v.begin() + ii);
+				break;
+			}
+		}
+
+		LOG_INFO(LogBots, "[ogfn] healed bot#{} item={} hp {:.0f}->{:.0f} sh {:.0f}->{:.0f}",
+			(int)(&M - &g_minds[0]), M.healItem, curHp, newHp, curSh, newSh);
 		return true;
 	}
 
@@ -3011,7 +3084,14 @@ void TickAll()
 			// engine's number is the one the client animates against, so this is what
 			// the snapshot reports and what the brain's engine-gate reads.
 			if (M.healEquipped && M.healRemaining > 0.f)
+			{
 				M.healRemaining = (std::max)(0.f, M.healRemaining - dt);
+				// The moment the countdown finishes, the restore LANDS. Equipping alone
+				// was all this ever did: the client has no use-item path, so a bot drank
+				// a pot over three seconds and came out exactly as hurt as it went in.
+				if (M.healRemaining <= 0.f)
+					ApplyConsumable(M, Pawn, Controller);
+			}
 			if (!M.healEquipped) {
 				M.healEquipped = true;
 				M.healItem = M.brain.heal_item();
@@ -3212,6 +3292,7 @@ void TestMarkAttacker(size_t i, size_t attackerIdx) {
 void TestClearAttribution() { g_lastAttacker.clear(); }
 int TestBuildNetPushed() { return g_buildNetPushed; }
 int TestArmedByFallback() { return g_armedByFallback; }
+int TestHealsApplied(size_t i) { return i < g_minds.size() ? g_minds[i].healsApplied : -1; }
 // Which weapon class the bot's motor is currently using (its equipped profile).
 int TestEquippedClass(size_t i) {
 	return i < g_minds.size() ? (int)g_minds[i].armedProfile.cls : -1;

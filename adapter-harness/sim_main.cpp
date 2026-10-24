@@ -52,7 +52,7 @@ namespace OgfnBot { void TestClearBurstState(size_t i); void TestSetLadder(float
                   int TestPickupsTaken(size_t); int TestLootSpotCount(); int TestPickupCompletions();
                   void TestClearConsumables(size_t); void TestGrantWeapons(); int TestArmedByFallback();
                   int TestIsArmedByLoot(size_t); void TestDisarmBot(size_t);
-                  int TestEquippedClass(size_t); void TestAddWeapon(size_t, const char*);
+                  int TestEquippedClass(size_t); int TestHealsApplied(size_t); void TestAddWeapon(size_t, const char*);
                   void TestEquipBest(size_t);
                   int TestLootWant(size_t); float TestLootWorth(size_t); int TestArmedFlag(size_t);
                   const char* TestActionName(size_t); float TestMoveToX(size_t);
@@ -1050,6 +1050,45 @@ int main()
 		OgfnBot::TestEquipBest(0);
 		EXPECT(OgfnBot::TestEquippedClass(0) == upgraded,
 		       "re-equipping with no change does not flicker back");
+	}
+
+	// ---------- P23: a heal actually RESTORES ----------
+	// The adapter equipped the consumable and counted the animation down, and nothing
+	// else: the client has no use-item path. A bot drank a pot for three seconds and came
+	// out exactly as hurt as it went in, so it lost every fight after its first.
+	std::printf("\n-- P23: drinking a pot restores what it should --\n");
+	{
+		world.ND->Connections.v.clear();
+		EnemyPawn->bDestroyed = true;
+		Harness::g_wallUp = false;
+		OgfnBot::TestSetLadder(90000.f, 45000.f, 30000.f);
+		P0->Location = FVector(90000.f, 45000.f, 100.f);
+		for (size_t bi = 1; bi < AllPlayerBotsToTick.size(); ++bi)
+		{
+			AllPlayerBotsToTick[bi].Pawn->bDestroyed = true;
+			AllPlayerBotsToTick[bi].Pawn->Location =
+				FVector(90000.f + (float)bi * 500000.f, 45000.f, 100.f);
+		}
+		OgfnBot::TestClearEnemies();
+		OgfnBot::TestClearConsumables(0);
+
+		// Hurt, and carrying one big pot. No loot on the floor to distract it.
+		auto* PC4 = Harness::g_namedClasses[L"/Script/FortniteGame.FortPickup"];
+		if (PC4) Harness::g_classObjects[PC4].clear();
+		OgfnBot::TestForceLoot();
+		P0->Health = 60.f;
+		P0->Shield = 0.f;
+		OgfnBot::TestGiveConsumable(0, ItemClass::ShieldBig, 1);
+
+		const int appliedBefore = OgfnBot::TestHealsApplied(0);
+		for (int k = 0; k < 30 * 12 && OgfnBot::TestHealsApplied(0) == appliedBefore; ++k)
+			TickFor(1.0 / 30.0);
+		const int applied = OgfnBot::TestHealsApplied(0) - appliedBefore;
+		std::printf("  [P23] applied=%d shield=%.0f health=%.0f\n",
+			applied, P0->Shield, P0->Health);
+		EXPECT(applied > 0, "a finished heal applies its effect");
+		EXPECT(P0->Shield > 0.f, "a big pot raises the shield it is supposed to raise");
+		EXPECT(P0->Shield <= 100.f, "and never past the 100 cap");
 	}
 
 	// ---------- summary ----------
