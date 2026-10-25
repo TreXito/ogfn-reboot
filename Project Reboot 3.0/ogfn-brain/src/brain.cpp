@@ -173,6 +173,10 @@ float Brain::score(ActionKind k, const WorldSnapshot& w) const {
       // one match, which reads as a machine. People build when rounds are landing, or
       // when they are hurt and need a moment.
       if (!w.recently_damaged && w.self_health > 60.f) return 0.f;
+      // AND you need something to build with. A player with no materials does not plan a
+      // box-up; planning one is what produced 18% refused build inputs, where the bot
+      // kept asking for pieces it could not pay for. 10 is one wood piece.
+      if (w.inventory.materials < kMaterialsPerPiece) return 0.f;
       float s = 0.34f * (0.3f + p.build_speed);
       s *= lerpf(1.8f, 0.6f, hp);   // building is for when the trade is lost
       s *= lerpf(1.4f, 0.7f, p.aggression);

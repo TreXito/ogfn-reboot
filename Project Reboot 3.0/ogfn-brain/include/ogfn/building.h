@@ -1,4 +1,5 @@
 #pragma once
+
 #include <utility>
 #include <vector>
 
@@ -7,6 +8,12 @@
 #include "rng.h"
 
 namespace ogfn {
+
+// Wood cost of one building piece, in the game's units. Lives here because the brain has
+// to know what a build COSTS before it plans one: scoring Build with an empty material
+// pile produced refused inputs, i.e. a bot repeatedly asking for something impossible.
+inline constexpr int kMaterialsPerPiece = 10;
+
 
 // Which piece the bot wants next. Ramp first is the human habit: you want height
 // before anything else, because height wins every trade that is not point blank.

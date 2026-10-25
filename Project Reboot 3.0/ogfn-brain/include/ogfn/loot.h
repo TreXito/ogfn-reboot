@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 
+#include "building.h"
 #include "mathx.h"
 #include "persona.h"
 #include "rng.h"

@@ -149,8 +149,10 @@ float LootValuer::worth_of(const LootSample& s, const Inventory& inv, float dist
   // gentler for the things a bot is missing, not only for a gun.
   const bool needs_defence = (s.cls == ItemClass::ShieldPotion || s.cls == ItemClass::ShieldBig ||
                               s.cls == ItemClass::Medkit || s.cls == ItemClass::Bandage);
+  const bool needy_materials = (s.cls == ItemClass::Materials) &&
+                               inv.materials < kMaterialsPerPiece * 3;
   const bool desperate = (inv.weapon_tier <= 0 && is_weapon) ||
-                         (needs_defence && inv.shield < 50);
+                         (needs_defence && inv.shield < 50) || needy_materials;
   const float scale = desperate ? 90.f : 18.f;   // a much gentler falloff when unarmed
   const float walk_cost = 1.f + (dist / scale) * (dist / scale);
   float worth = base / walk_cost;
@@ -197,8 +199,13 @@ LootChoice LootValuer::choose(const std::vector<LootSample>& samples, const Inve
     // Measured in the offline match sim, bots took 1.3 items each and then went quiet for
     // the rest of the game, because once they were "armed" their search radius collapsed
     // to 45m and there was nothing inside it.
-    const bool under_geared = inv.weapon_tier <= 0 || inv.shield < 50;
-    const float radius = (under_geared && (is_weapon || is_defence)) ? 150.f : 45.f;
+    // Materials count as a need too. With finite resources a bot that never picks any up
+    // can never build, and the offline sim showed exactly that: 0 materials on every bot
+    // and 0 builds in a whole match. Three pieces' worth is the threshold for bothering.
+    const bool is_material = (s.cls == ItemClass::Materials);
+    const bool under_geared = inv.weapon_tier <= 0 || inv.shield < 50 ||
+                              inv.materials < kMaterialsPerPiece * 3;
+    const float radius = (under_geared && (is_weapon || is_defence || is_material)) ? 150.f : 45.f;
     if (dist > radius) continue;
     const float w = worth_of(s, inv, dist, circle_closing_secs, engaged);
     if (w > best.worth) {

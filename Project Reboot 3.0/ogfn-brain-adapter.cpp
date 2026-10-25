@@ -501,9 +501,37 @@ namespace
 	}
 
 	bool ApplyBuildPiece(AFortPlayerControllerAthena* Controller, AFortPlayerPawnAthena* Pawn,
-	                     const ogfn::BuildInput& In, const ogfn::BuildGrid& Grid) {
-		if (!Controller || !Pawn || In.piece == ogfn::PieceKind::None)
+	                     const ogfn::BuildInput& In, const ogfn::BuildGrid& Grid,
+	                     ogfn::BuildRefusal* OutWhy = nullptr) {
+		auto refuse = [&](ogfn::BuildRefusal r) {
+			if (OutWhy) *OutWhy = r;
 			return false;
+		};
+		if (!Controller || !Pawn || In.piece == ogfn::PieceKind::None)
+			return refuse(ogfn::BuildRefusal::Unknown);
+
+		// Pay for it, when resources are real. The arena default is infinite, in which case
+		// this is skipped entirely; with finite materials a bot that cannot afford a piece
+		// must SAY SO so the builder can stop planning it.
+		if (!Globals::bInfiniteMaterials)
+		{
+			int Have = 0;
+			if (auto* Inv = Controller->GetWorldInventory())
+			{
+				auto& Instances = Inv->GetItemList().GetItemInstances();
+				for (int k = 0; k < Instances.Num(); ++k)
+				{
+					auto* Item = Instances.At(k);
+					if (!Item || !Item->GetItemEntry()) continue;
+					auto* Def = Item->GetItemEntry()->GetItemDefinition();
+					if (!Def) continue;
+					if (ogfn::classify_item(Def->GetFullName()) == ogfn::ItemClass::Materials)
+						Have += Item->GetItemEntry()->GetCount();
+				}
+			}
+			if (Have < ogfn::kMaterialsPerPiece)
+				return refuse(ogfn::BuildRefusal::NoResource);
+		}
 
 		UClass* Class = ResolvesBuildClass(In.piece);
 		if (!Class) {
@@ -1184,6 +1212,18 @@ namespace
 
 		// Stable per-controller pick so the lobby ends up with a mix of rifles.
 		size_t idx = ((uintptr_t)Controller) % g_weaponCands.size();
+#ifdef OGFN_HARNESS
+		// Under the harness the pointer is ASLR-dependent, so this pick changed on every
+		// run and the match simulator gave different verdicts for identical inputs
+		// ("lobby wiped" on 2 runs of 6). A sim that is not reproducible cannot be a gate.
+		//
+		// MUST stay modulo the size: `& 1u` looks deterministic but returns 1 whenever
+		// there is exactly one candidate, which indexes past the end, reads a garbage
+		// pointer, and then formats it as a string. That surfaced as an unexplained
+		// std::bad_alloc in long matches and cost a long hunt; the libstdc++ assertion
+		// build named it in one run.
+		idx = ((size_t)((uintptr_t)Controller >> 4)) % g_weaponCands.size();
+#endif
 		bool bShouldUpdate = false;
 		auto Res = WorldInventory->AddItem(g_weaponCands[idx], &bShouldUpdate, 1);
 		if (bShouldUpdate)
@@ -1407,8 +1447,14 @@ namespace
 		W.inventory = ogfn::Inventory{};
 		if (auto* Inv = Controller->GetWorldInventory())
 		{
-			W.inventory.ammo = 999;   // infinite ammo is on for bots (see the arena toggles)
-			W.inventory.materials = 999;
+			// HONEST RESOURCE ACCOUNTING. These were hardcoded 999 regardless of what the
+			// bot was carrying, so the brain could never reason about either: ammo loot
+			// was always worth nothing and materials were invisible, which is why bots
+			// ignored both on the floor. The arena toggles still mean "plenty" when they
+			// are on, so honouring them keeps this correct in both modes instead of
+			// replacing one constant with a wrong zero.
+			W.inventory.ammo = Globals::bInfiniteAmmo ? 999 : 0;
+			W.inventory.materials = Globals::bInfiniteMaterials ? 999 : 0;
 			// CURRENT shield belongs in the inventory too, not just the snapshot. The loot
 			// valuator asks "is a big pot the best thing on the floor" and the answer is
 			// entirely about how much shield you are carrying right now; leaving this at
@@ -1434,6 +1480,12 @@ namespace
 					case ogfn::ItemClass::ShieldPotion: W.inventory.small_shields += Count; break;
 					case ogfn::ItemClass::Medkit: W.inventory.medkits += Count; break;
 					case ogfn::ItemClass::Bandage: W.inventory.bandages += Count; break;
+					case ogfn::ItemClass::Ammo:
+						if (!Globals::bInfiniteAmmo) W.inventory.ammo += Count;
+						break;
+					case ogfn::ItemClass::Materials:
+						if (!Globals::bInfiniteMaterials) W.inventory.materials += Count;
+						break;
 					case ogfn::ItemClass::Shotgun: W.inventory.has_shotgun = true; break;
 					case ogfn::ItemClass::Sniper: W.inventory.has_sniper = true; break;
 					case ogfn::ItemClass::AssaultRifle:
@@ -1749,11 +1801,19 @@ void TickAll()
 	// This runs every net tick; the call is a cheap gated no-op after success.
 	OgfnLocker::AutoApplyOnce();
 
-	if (!Globals::bInfiniteAmmo)
+	// A ONE-TIME arena default, not a per-tick override. This ran every tick, so the
+	// "Infinite Ammo" / "Infinite Materials" checkboxes in the OGFN panel were forced back
+	// ON the moment anyone turned them off: the setting was unchangeable. Set it once at
+	// start-up and then respect whatever the user (or a harness) chooses after that.
 	{
-		Globals::bInfiniteAmmo = true;
-		Globals::bInfiniteMaterials = true;
-		LOG_INFO(LogBots, "[ogfn] infinite ammo/materials enabled for the bot arena");
+		static bool s_arenaDefaultsApplied = false;
+		if (!s_arenaDefaultsApplied)
+		{
+			s_arenaDefaultsApplied = true;
+			Globals::bInfiniteAmmo = true;
+			Globals::bInfiniteMaterials = true;
+			LOG_INFO(LogBots, "[ogfn] arena defaults: infinite ammo/materials (one-time; toggles respected after this)");
+		}
 	}
 
 	auto World = GetWorld();
@@ -3228,9 +3288,15 @@ void TickAll()
 				// a button. The failure reasons are inferred here: this client exposes
 				// no placement-failure reason, so a null spawn is treated as blocked and
 				// an empty material counter is checked directly when the fork has one.
-				const bool bPlaced = ApplyBuildPiece(Controller, Pawn, BIn, s_grid);
+				// The refusal REASON matters, not just the failure. Every failure used to
+				// be reported as Blocked, so the builder's no-material path could never
+				// fire: a bot with an empty material pile kept asking for pieces forever
+				// instead of giving up and doing something else. With finite resources
+				// enabled that is exactly the trap it is designed to escape.
+				ogfn::BuildRefusal Why = ogfn::BuildRefusal::None;
+				const bool bPlaced = ApplyBuildPiece(Controller, Pawn, BIn, s_grid, &Why);
 				M.builder.report_result(bPlaced,
-					bPlaced ? ogfn::BuildRefusal::None : ogfn::BuildRefusal::Blocked);
+					bPlaced ? ogfn::BuildRefusal::None : Why);
 				if (bPlaced)
 				{
 					M.buildCount++;
@@ -3401,6 +3467,8 @@ int TestPickupsTaken(size_t i) {
 	return i < g_minds.size() ? g_minds[i].pickupsTaken : -1;
 }
 int TestLootSpotCount() { return (int)g_lootSpots.size(); }
+int TestMatsSeen(size_t i) { return i < g_minds.size() ? g_minds[i].lastSnap.inventory.materials : -1; }
+int TestAmmoSeen(size_t i) { return i < g_minds.size() ? g_minds[i].lastSnap.inventory.ammo : -1; }
 int TestPickupCompletions() { return AFortPickup::s_completed; }
 int TestTrackedIds(size_t i) {
 	return i < g_minds.size() ? (int)g_minds[i].brain.perception().targets().size() : -1;

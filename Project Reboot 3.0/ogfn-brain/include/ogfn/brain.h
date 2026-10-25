@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 
+#include "building.h"
 #include "loot.h"
 #include "mathx.h"
 #include "perception.h"
@@ -207,6 +208,10 @@ class Brain {
   // test that wants to pin "what does Engage actually do" cannot get there through
   // think() deterministically. Not called from any gameplay path.
   Decision intent_for(ActionKind a, const WorldSnapshot& w) { return make_intent(a, w); }
+
+  // Test/tuning hook: what this action scores right now, before persona bias and jitter.
+  // Lets a test pin a GATE ("no materials means no build") without having to win an argmax.
+  float score_for(ActionKind a, const WorldSnapshot& w) const { return score(a, w); }
 
   void prime_action(ActionKind a, double now) {
     last_action_ = a;
