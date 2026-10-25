@@ -145,7 +145,12 @@ float LootValuer::worth_of(const LootSample& s, const Inventory& inv, float dist
   // rifle scored the same as a bandage two steps away.
   const bool is_weapon = (s.cls == ItemClass::AssaultRifle || s.cls == ItemClass::Shotgun ||
                           s.cls == ItemClass::Sniper || s.cls == ItemClass::Pistol);
-  const bool desperate = inv.weapon_tier <= 0 && is_weapon;
+  // Same "under-geared keeps shopping" rule as the radius above: the walk cost is
+  // gentler for the things a bot is missing, not only for a gun.
+  const bool needs_defence = (s.cls == ItemClass::ShieldPotion || s.cls == ItemClass::ShieldBig ||
+                              s.cls == ItemClass::Medkit || s.cls == ItemClass::Bandage);
+  const bool desperate = (inv.weapon_tier <= 0 && is_weapon) ||
+                         (needs_defence && inv.shield < 50);
   const float scale = desperate ? 90.f : 18.f;   // a much gentler falloff when unarmed
   const float walk_cost = 1.f + (dist / scale) * (dist / scale);
   float worth = base / walk_cost;
@@ -184,7 +189,16 @@ LootChoice LootValuer::choose(const std::vector<LootSample>& samples, const Inve
     // the whole match while slowly rotating to the zone.
     const bool is_weapon = (s.cls == ItemClass::AssaultRifle || s.cls == ItemClass::Shotgun ||
                             s.cls == ItemClass::Sniper || s.cls == ItemClass::Pistol);
-    const float radius = (inv.weapon_tier <= 0 && is_weapon) ? 150.f : 45.f;
+    const bool is_defence = (s.cls == ItemClass::ShieldPotion || s.cls == ItemClass::ShieldBig ||
+                             s.cls == ItemClass::Medkit || s.cls == ItemClass::Bandage ||
+                             s.cls == ItemClass::Ammo);
+    // UNDER-GEARED bots keep shopping. A player who has just found a rifle but no
+    // shields, no ammo and no materials does not stop looting: they clear the building.
+    // Measured in the offline match sim, bots took 1.3 items each and then went quiet for
+    // the rest of the game, because once they were "armed" their search radius collapsed
+    // to 45m and there was nothing inside it.
+    const bool under_geared = inv.weapon_tier <= 0 || inv.shield < 50;
+    const float radius = (under_geared && (is_weapon || is_defence)) ? 150.f : 45.f;
     if (dist > radius) continue;
     const float w = worth_of(s, inv, dist, circle_closing_secs, engaged);
     if (w > best.worth) {

@@ -168,6 +168,11 @@ float Brain::score(ActionKind k, const WorldSnapshot& w) const {
 
     case ActionKind::Build: {
       if (!engaged) return 0.f;
+      // Only REACTIVELY. An enemy existing is not a reason to start building: measured in
+      // the offline match sim, gating on "engaged" alone produced 257 pieces per bot over
+      // one match, which reads as a machine. People build when rounds are landing, or
+      // when they are hurt and need a moment.
+      if (!w.recently_damaged && w.self_health > 60.f) return 0.f;
       float s = 0.34f * (0.3f + p.build_speed);
       s *= lerpf(1.8f, 0.6f, hp);   // building is for when the trade is lost
       s *= lerpf(1.4f, 0.7f, p.aggression);

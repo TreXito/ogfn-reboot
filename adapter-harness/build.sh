@@ -12,4 +12,35 @@ g++ -std=c++20 -DOGFN_SIM_TRACE -DOGFN_HARNESS -Wall -Wextra -Wno-unused-paramet
   adapter-under-test.cpp "$BRAIN/src/brain.cpp" "$BRAIN/src/motor.cpp" \
   "$BRAIN/src/perception.cpp" "$BRAIN/src/persona.cpp" "$BRAIN/src/locomotion.cpp" "$BRAIN/src/building.cpp" "$BRAIN/src/loot.cpp" "$BRAIN/src/squad.cpp" "$BRAIN/src/hitmodel.cpp" sim_main.cpp \
   -o ./sim
+
+# WHOLE-MATCH GATE. The scenarios above test pieces in isolation; a piece can pass and
+# still compose into nonsense (that is how 50 green assertions coexisted with bots that
+# never picked anything up). This runs a full 8-minute match in ~6s and fails if the
+# pacing stops being plausible: nobody dying, everyone dying early, nobody armed from
+# loot, nobody moving, or walls up nonstop.
+if ! ./matchsim 40 8; then
+  echo
+  echo "MATCH SIM FAILED: the pieces pass but they do not compose into a match."
+  exit 1
+fi
+
+# The match simulator: the same real adapter and brain, run as a whole match and
+# REPORTED instead of asserted. Separate binary so the assertion suite stays untouched.
+g++ -std=c++20 -DOGFN_HARNESS -O2 -Wno-unused-parameter -g \
+  -I. -Istubs -I"$BRAIN/include" \
+  adapter-under-test.cpp "$BRAIN/src/brain.cpp" "$BRAIN/src/motor.cpp" \
+  "$BRAIN/src/perception.cpp" "$BRAIN/src/persona.cpp" "$BRAIN/src/locomotion.cpp" "$BRAIN/src/building.cpp" "$BRAIN/src/loot.cpp" "$BRAIN/src/squad.cpp" "$BRAIN/src/hitmodel.cpp" match_sim.cpp \
+  -o ./matchsim
+
 ./sim
+
+# WHOLE-MATCH GATE. The scenarios above test pieces in isolation; a piece can pass and
+# still compose into nonsense (that is how 50 green assertions coexisted with bots that
+# never picked anything up). This runs a full 8-minute match in ~6s and fails if the
+# pacing stops being plausible: nobody dying, everyone dying early, nobody armed from
+# loot, nobody moving, or walls up nonstop.
+if ! ./matchsim 40 8; then
+  echo
+  echo "MATCH SIM FAILED: the pieces pass but they do not compose into a match."
+  exit 1
+fi

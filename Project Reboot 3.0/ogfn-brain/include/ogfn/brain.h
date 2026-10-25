@@ -56,6 +56,10 @@ struct WorldSnapshot {
   // fight and backing off from one are different moves, and "walk to the circle centre
   // instead" is how every bot in every fight converged on the same point.
   Vec3 target_pos{};
+  // Hurt within the last moment. Building is a REACTION to being shot at, not a standing
+  // preference: with only "an enemy exists" to go on, a bot boxes up continuously and
+  // places hundreds of pieces in a match, which no player does.
+  bool recently_damaged = false;
   float target_health = 100.f;
   bool target_is_reloading = true;
 

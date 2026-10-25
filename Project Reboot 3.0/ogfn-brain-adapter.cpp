@@ -972,7 +972,15 @@ namespace
 
 	void RefreshLoot(double Now)
 	{
-		if (!g_lootScanned || Now < g_lootNextRefresh)
+		// SCAN ON THE FIRST CALL, then on the cadence.
+		//
+		// This guard used to read `if (!g_lootScanned || ...) return;` with the flag
+		// starting false, so the very first call returned and set nothing: the loot scan
+		// NEVER RAN. Every bot in every match was blind to every item on the floor, which
+		// is why nothing was ever picked up and why arming only ever happened through the
+		// arena fallback. Only the harness's TestForceLoot() set that flag, so the bug was
+		// invisible to every scenario while being total in production.
+		if (g_lootNextRefresh > 0.0 && Now < g_lootNextRefresh)
 			return;
 		g_lootScanned = true;
 		g_lootNextRefresh = Now + kLootRefreshSecs;
@@ -1376,7 +1384,11 @@ namespace
 			// feed has to be at least as wide as the valuator's reach or that rule can
 			// never fire: a bot would be told about nothing beyond 46m and would stay
 			// unarmed while slowly rotating to the zone.
-			const float feedRadius = M.bArmed ? 46.f : 150.f;
+			// Same rule as the brain's search radius: a bot that is still under-geared
+			// (no gun, or no shields) keeps being told about loot further out, because
+			// it is still shopping. Otherwise the feed capped at 46m and the brain's
+			// wider radius had nothing to look at.
+			const float feedRadius = (!M.bArmed || W.self_shield < 50.f) ? 150.f : 46.f;
 			if (d2 <= feedRadius * feedRadius)
 			{
 				ogfn::LootSample Sample;
@@ -1661,6 +1673,13 @@ namespace
 		In.yaw_deg = Out.yaw_deg;
 		In.pitch_deg = Out.pitch_deg;
 		In.target_center = ToVec(AimPoint);
+		// A DEAD PAWN IS NOT A TARGET. Without this, a victim left at 0 health kept being
+		// hit by every later round, and each hit re-ran ForceKill and logged another
+		// ELIM: the kill count inflates and the same bot "dies" dozens of times. It also
+		// means the shooter keeps aiming at a corpse instead of the next threat.
+		if (Victim->GetHealth() <= 0.f)
+			return;
+
 		In.target_health = Victim->GetHealth();
 		In.target_shield = Victim->GetShield();
 		In.has_line_of_sight = CanSee(Pawn, SelfLoc, AimPoint);   // the ENGINE decides
@@ -3373,6 +3392,11 @@ void TestDisarmBot(size_t i) {
 			Inv->GetItemList().GetItemInstances().v.clear();
 }
 // Loot actually collected, and the loot spots the scan currently sees.
+int TestLootSamplesSeen(size_t i) { return i < g_minds.size() ? (int)g_minds[i].lastSnap.loot.size() : -1; }
+float TestLootWorth(size_t i) { return i < g_minds.size() ? g_minds[i].brain.loot_choice().worth : -1.f; }
+const char* TestActionName(size_t i) {
+	return i < g_minds.size() ? ogfn::to_string(g_minds[i].decision.action) : "?";
+}
 int TestPickupsTaken(size_t i) {
 	return i < g_minds.size() ? g_minds[i].pickupsTaken : -1;
 }
